@@ -90,23 +90,48 @@ The document tools return JSON data with document IDs that you can use to constr
     const oidcClientId = process.env.OIDC_CLIENT_ID ?? "";
     const oidcClientSecret = process.env.OIDC_CLIENT_SECRET ?? "";
 
+    // Log config once at startup so we can verify env vars are loaded
+    console.log("[auth] Config: MCP_API_KEY=%s OIDC_INTROSPECTION_URL=%s OIDC_CLIENT_ID=%s OIDC_CLIENT_SECRET=%s",
+      mcpApiKey ? `set(${mcpApiKey.length} chars)` : "NOT SET",
+      oidcIntrospectionUrl || "NOT SET",
+      oidcClientId || "NOT SET",
+      oidcClientSecret ? `set(${oidcClientSecret.length} chars)` : "NOT SET",
+    );
+
     const isAuthorized = async (req: express.Request): Promise<boolean> => {
-      if (!mcpApiKey) return true; // no auth configured
-
-      const auth = req.headers.authorization ?? "";
-
-      if (auth === `Bearer ${mcpApiKey}`) {
-        console.log("Auth OK: static Bearer token");
+      if (!mcpApiKey) {
+        console.log("[auth] No MCP_API_KEY configured – skipping auth");
         return true;
       }
 
-      if (
-        auth.startsWith("Bearer ") &&
-        oidcIntrospectionUrl &&
-        oidcClientId &&
-        oidcClientSecret
-      ) {
+      const auth = req.headers.authorization ?? "";
+      const authPreview = auth
+        ? auth.slice(0, 20) + (auth.length > 20 ? "…" : "")
+        : "(none)";
+      console.log("[auth] %s %s – Authorization: %s", req.method, req.path, authPreview);
+
+      if (!auth) {
+        console.log("[auth] DENIED – no Authorization header");
+        return false;
+      }
+
+      if (auth === `Bearer ${mcpApiKey}`) {
+        console.log("[auth] OK – static Bearer token matched");
+        return true;
+      }
+
+      if (auth.startsWith("Bearer ")) {
+        if (!oidcIntrospectionUrl || !oidcClientId || !oidcClientSecret) {
+          console.log("[auth] DENIED – JWT received but OIDC not fully configured: url=%s id=%s secret=%s",
+            oidcIntrospectionUrl ? "set" : "MISSING",
+            oidcClientId ? "set" : "MISSING",
+            oidcClientSecret ? "set" : "MISSING",
+          );
+          return false;
+        }
+
         const jwtToken = auth.slice(7);
+        console.log("[auth] JWT token received (len=%d), calling introspection: %s", jwtToken.length, oidcIntrospectionUrl);
         try {
           const credentials = Buffer.from(
             `${oidcClientId}:${oidcClientSecret}`
@@ -120,14 +145,23 @@ The document tools return JSON data with document IDs that you can use to constr
             body: `token=${encodeURIComponent(jwtToken)}`,
             signal: AbortSignal.timeout(5000),
           });
-          const data = (await resp.json()) as { active?: boolean };
-          console.log("OIDC Introspection: active=%s", data.active);
-          return data.active === true;
+          const body = await resp.text();
+          console.log("[auth] Introspection HTTP %d – body: %s", resp.status, body.slice(0, 200));
+          const data = JSON.parse(body) as { active?: boolean };
+          if (data.active === true) {
+            console.log("[auth] OK – OIDC token active");
+            return true;
+          } else {
+            console.log("[auth] DENIED – OIDC token not active");
+            return false;
+          }
         } catch (e) {
-          console.error("Introspection failed:", e);
+          console.error("[auth] Introspection error:", e);
+          return false;
         }
       }
 
+      console.log("[auth] DENIED – Authorization header is not a Bearer token");
       return false;
     };
 
