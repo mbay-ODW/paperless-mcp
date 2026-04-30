@@ -4,21 +4,23 @@ services:
     container_name: paperless-mcp
     restart: unless-stopped
     environment:
-      - LOG_LEVEL=INFO
       # Paperless-ngx
       - PAPERLESS_URL=${PAPERLESS_URL}
       - PAPERLESS_API_KEY=${PAPERLESS_API_KEY}
       - PAPERLESS_PUBLIC_URL=${PAPERLESS_PUBLIC_URL:-${PAPERLESS_URL}}
       # Auth
       - MCP_API_KEY=${MCP_API_KEY}
-      - OIDC_INTROSPECTION_URL=https://paperless-mcp.${DOMAIN}/api/oidc/introspection
-      - OIDC_CLIENT_ID=paperless-mcp
+      # Direct internal Authelia URL (recommended) or external via Traefik:
+      # https://paperless-mcp.${DOMAIN}/api/oidc/introspection
+      - OIDC_INTROSPECTION_URL=${OIDC_INTROSPECTION_URL:-http://authelia:9091/api/oidc/introspection}
+      - OIDC_CLIENT_ID=${OIDC_CLIENT_ID:-paperless-mcp}
       - OIDC_CLIENT_SECRET=${OIDC_CLIENT_SECRET}
     expose:
       - "3000"
     labels:
       - "traefik.enable=true"
       - "traefik.docker.network=traefik"
+      # SSE transport (legacy, still supported)
       - "traefik.http.routers.paperless-mcp-sse.rule=Host(`paperless-mcp.${DOMAIN}`) && PathPrefix(`/sse`)"
       - "traefik.http.routers.paperless-mcp-sse.entrypoints=websecure"
       - "traefik.http.routers.paperless-mcp-sse.service=paperless-mcp-svc"
@@ -31,6 +33,7 @@ services:
       - "traefik.http.routers.paperless-mcp-msg.tls=true"
       - "traefik.http.routers.paperless-mcp-msg.tls.certresolver=mydnschallenge"
       - "traefik.http.routers.paperless-mcp-msg.middlewares=middlewares-rate-limit@file,middlewares-secure-headers@file"
+      # Streamable HTTP transport (new, preferred by Claude.ai)
       - "traefik.http.routers.paperless-mcp-http.rule=Host(`paperless-mcp.${DOMAIN}`) && PathPrefix(`/mcp`)"
       - "traefik.http.routers.paperless-mcp-http.entrypoints=websecure"
       - "traefik.http.routers.paperless-mcp-http.service=paperless-mcp-svc"
@@ -40,7 +43,15 @@ services:
       - "traefik.http.services.paperless-mcp-svc.loadbalancer.server.port=3000"
     networks:
       - traefik
+      # Add the paperless-ngx stack network so this container can reach
+      # http://webserver:8000 (internal Paperless URL).
+      # Set PAPERLESS_NETWORK to the actual network name from your paperless stack,
+      # e.g. "paperless_default" or just "default" in the same compose project.
+      - paperless
 
 networks:
   traefik:
     external: true
+  paperless:
+    external: true
+    name: ${PAPERLESS_NETWORK:-paperless_default}
