@@ -1,9 +1,7 @@
 name: Release
 
 on:
-  push:
-    branches:
-      - main
+  workflow_dispatch: # disabled on push – not needed in fork
 
 permissions:
   id-token: write # Required for OIDC
