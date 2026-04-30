@@ -77,10 +77,69 @@ The document tools return JSON data with document IDs that you can use to constr
     const app = express();
     app.use(express.json());
 
+    // ------------------------------------------------------------------
+    // OIDC / Bearer auth middleware
+    // Env vars:
+    //   MCP_API_KEY              – static fallback token (optional)
+    //   OIDC_INTROSPECTION_URL   – Authelia introspection endpoint
+    //   OIDC_CLIENT_ID           – client id for introspection auth
+    //   OIDC_CLIENT_SECRET       – client secret for introspection auth
+    // ------------------------------------------------------------------
+    const mcpApiKey = process.env.MCP_API_KEY ?? "";
+    const oidcIntrospectionUrl = process.env.OIDC_INTROSPECTION_URL ?? "";
+    const oidcClientId = process.env.OIDC_CLIENT_ID ?? "";
+    const oidcClientSecret = process.env.OIDC_CLIENT_SECRET ?? "";
+
+    const isAuthorized = async (req: express.Request): Promise<boolean> => {
+      if (!mcpApiKey) return true; // no auth configured
+
+      const auth = req.headers.authorization ?? "";
+
+      if (auth === `Bearer ${mcpApiKey}`) {
+        console.log("Auth OK: static Bearer token");
+        return true;
+      }
+
+      if (
+        auth.startsWith("Bearer ") &&
+        oidcIntrospectionUrl &&
+        oidcClientId &&
+        oidcClientSecret
+      ) {
+        const jwtToken = auth.slice(7);
+        try {
+          const credentials = Buffer.from(
+            `${oidcClientId}:${oidcClientSecret}`
+          ).toString("base64");
+          const resp = await fetch(oidcIntrospectionUrl, {
+            method: "POST",
+            headers: {
+              "Content-Type": "application/x-www-form-urlencoded",
+              Authorization: `Basic ${credentials}`,
+            },
+            body: `token=${encodeURIComponent(jwtToken)}`,
+            signal: AbortSignal.timeout(5000),
+          });
+          const data = (await resp.json()) as { active?: boolean };
+          console.log("OIDC Introspection: active=%s", data.active);
+          return data.active === true;
+        } catch (e) {
+          console.error("Introspection failed:", e);
+        }
+      }
+
+      return false;
+    };
+
+    const authMiddleware: express.RequestHandler = async (req, res, next) => {
+      if (await isAuthorized(req)) return next();
+      res.status(401).json({ error: "Unauthorized" });
+    };
+
     // Store transports for each session
     const sseTransports: Record<string, SSEServerTransport> = {};
 
-    app.post("/mcp", async (req, res) => {
+    app.post("/mcp", authMiddleware, async (req, res) => {
       try {
         const transport = new StreamableHTTPServerTransport({
           sessionIdGenerator: undefined,
@@ -131,7 +190,7 @@ The document tools return JSON data with document IDs that you can use to constr
       );
     });
 
-    app.get("/sse", async (req, res) => {
+    app.get("/sse", authMiddleware, async (req, res) => {
       console.log("SSE request received");
       try {
         const transport = new SSEServerTransport("/messages", res);
@@ -156,7 +215,7 @@ The document tools return JSON data with document IDs that you can use to constr
       }
     });
 
-    app.post("/messages", async (req, res) => {
+    app.post("/messages", authMiddleware, async (req, res) => {
       const sessionId = req.query.sessionId as string;
       const transport = sseTransports[sessionId];
       if (transport) {

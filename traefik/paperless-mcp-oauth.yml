@@ -1,0 +1,58 @@
+http:
+  middlewares:
+    rewrite-authorize-paperless:
+      replacePath:
+        path: "/api/oidc/authorization"
+
+  routers:
+    paperless-mcp-authorize:
+      rule: "Host(`paperless-mcp.example.com`) && PathPrefix(`/authorize`)"
+      entrypoints: [websecure]
+      service: authelia-oidc
+      middlewares: [rewrite-authorize-paperless]
+      tls:
+        certResolver: mydnschallenge
+
+    paperless-mcp-root:
+      rule: "Host(`paperless-mcp.example.com`) && Path(`/`)"
+      entrypoints: [websecure]
+      service: authelia-oidc
+      tls:
+        certResolver: mydnschallenge
+
+    paperless-mcp-oidc:
+      rule: "Host(`paperless-mcp.example.com`) && PathPrefix(`/api/oidc`)"
+      entrypoints: [websecure]
+      service: authelia-oidc
+      tls:
+        certResolver: mydnschallenge
+
+    paperless-mcp-api:
+      rule: "Host(`paperless-mcp.example.com`) && PathPrefix(`/api`)"
+      entrypoints: [websecure]
+      service: authelia-oidc
+      tls:
+        certResolver: mydnschallenge
+
+    paperless-mcp-consent:
+      rule: "Host(`paperless-mcp.example.com`) && PathPrefix(`/consent`)"
+      entrypoints: [websecure]
+      service: authelia-oidc
+      tls:
+        certResolver: mydnschallenge
+
+    paperless-mcp-static:
+      rule: "Host(`paperless-mcp.example.com`) && PathPrefix(`/static`)"
+      entrypoints: [websecure]
+      service: authelia-oidc
+      tls:
+        certResolver: mydnschallenge
+
+    paperless-mcp-wellknown:
+      rule: "Host(`paperless-mcp.example.com`) && PathPrefix(`/.well-known`)"
+      entrypoints: [websecure]
+      service: authelia-oidc
+      tls:
+        certResolver: mydnschallenge
+
+  # authelia-oidc service is defined centrally in hero-mcp-oauth.yml (shared)
