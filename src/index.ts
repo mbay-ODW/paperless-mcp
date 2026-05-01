@@ -89,6 +89,10 @@ The document tools return JSON data with document IDs that you can use to constr
     const oidcIntrospectionUrl = process.env.OIDC_INTROSPECTION_URL ?? "";
     const oidcClientId = process.env.OIDC_CLIENT_ID ?? "";
     const oidcClientSecret = process.env.OIDC_CLIENT_SECRET ?? "";
+    // Base URL of the Authelia OAuth/OIDC server (e.g. https://authelia.example.com)
+    const oauthIssuer = process.env.OAUTH_ISSUER ?? "";
+    // Public URL of this MCP server (e.g. https://mcp.example.com)
+    const mcpServerUrl = process.env.MCP_SERVER_URL ?? "";
 
     // Log config once at startup so we can verify env vars are loaded
     console.log("[auth] Config: MCP_API_KEY=%s OIDC_INTROSPECTION_URL=%s OIDC_CLIENT_ID=%s OIDC_CLIENT_SECRET=%s",
@@ -172,6 +176,41 @@ The document tools return JSON data with document IDs that you can use to constr
 
     // Store transports for each session
     const sseTransports: Record<string, SSEServerTransport> = {};
+
+    // Both discovery endpoints must be BEFORE authMiddleware – publicly
+    // accessible so Claude.ai can bootstrap the OAuth flow without a token.
+
+    // RFC 9728 – OAuth 2.0 Protected Resource Metadata
+    // Claude.ai fetches this FIRST to find out which authorization server
+    // protects this resource.
+    if (oauthIssuer && mcpServerUrl) {
+      app.get("/.well-known/oauth-protected-resource", (_req, res) => {
+        res.json({
+          resource: mcpServerUrl,
+          authorization_servers: [oauthIssuer],
+          bearer_methods_supported: ["header"],
+          scopes_supported: ["openid", "profile", "email"],
+        });
+      });
+    }
+
+    // RFC 8414 – OAuth 2.0 Authorization Server Metadata
+    // Describes all Authelia endpoints Claude.ai needs for the OAuth flow.
+    if (oauthIssuer) {
+      app.get("/.well-known/oauth-authorization-server", (_req, res) => {
+        res.json({
+          issuer: oauthIssuer,
+          authorization_endpoint: `${oauthIssuer}/api/oidc/authorization`,
+          token_endpoint: `${oauthIssuer}/api/oidc/token`,
+          jwks_uri: `${oauthIssuer}/jwks.json`,
+          introspection_endpoint: `${oauthIssuer}/api/oidc/introspection`,
+          response_types_supported: ["code"],
+          grant_types_supported: ["authorization_code", "refresh_token"],
+          code_challenge_methods_supported: ["S256"],
+          scopes_supported: ["openid", "profile", "email"],
+        });
+      });
+    }
 
     app.post("/mcp", authMiddleware, async (req, res) => {
       try {

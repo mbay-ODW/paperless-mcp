@@ -15,6 +15,10 @@ services:
       - OIDC_INTROSPECTION_URL=${OIDC_INTROSPECTION_URL:-http://authelia:9091/api/oidc/introspection}
       - OIDC_CLIENT_ID=${OIDC_CLIENT_ID:-paperless-mcp}
       - OIDC_CLIENT_SECRET=${OIDC_CLIENT_SECRET}
+      # Public Authelia URL – RFC 8414 OAuth Authorization Server Metadata
+      - OAUTH_ISSUER=${OAUTH_ISSUER}
+      # Public URL of this MCP server – RFC 9728 Protected Resource Metadata
+      - MCP_SERVER_URL=${MCP_SERVER_URL:-https://paperless-mcp.${DOMAIN}}
     expose:
       - "3000"
     labels:
