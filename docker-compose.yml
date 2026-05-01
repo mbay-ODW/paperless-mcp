@@ -19,38 +19,36 @@ services:
       - OAUTH_ISSUER=${OAUTH_ISSUER}
       # Public URL of this MCP server – RFC 9728 Protected Resource Metadata
       - MCP_SERVER_URL=${MCP_SERVER_URL:-https://paperless-mcp.${DOMAIN}}
+      # Logging level: error | warn | info | debug | trace
+      - LOG_LEVEL=${LOG_LEVEL:-info}
     expose:
       - "3000"
+    # Single Host(...) router – all paths under paperless-mcp.${DOMAIN} go to
+    # this container, including /.well-known/* (RFC 8414 + RFC 9728), /sse,
+    # /messages, /mcp. This is the same pattern Marco's upstream
+    # (marco2901/paperless-mcp-server) uses and the only one that lets
+    # Claude.ai bootstrap the OAuth flow correctly, because Authelia does
+    # not serve RFC 9728 (oauth-protected-resource) by default.
+    #
+    # IMPORTANT: do NOT mount a Traefik file-provider config that intercepts
+    # /.well-known/* on this host – that would short-circuit the discovery
+    # to Authelia, which returns 404 for RFC 9728 and breaks the flow.
     labels:
       - "traefik.enable=true"
       - "traefik.docker.network=traefik"
-      # SSE transport (legacy, still supported)
-      - "traefik.http.routers.paperless-mcp-sse.rule=Host(`paperless-mcp.${DOMAIN}`) && PathPrefix(`/sse`)"
-      - "traefik.http.routers.paperless-mcp-sse.entrypoints=websecure"
-      - "traefik.http.routers.paperless-mcp-sse.service=paperless-mcp-svc"
-      - "traefik.http.routers.paperless-mcp-sse.tls=true"
-      - "traefik.http.routers.paperless-mcp-sse.tls.certresolver=mydnschallenge"
-      - "traefik.http.routers.paperless-mcp-sse.middlewares=middlewares-rate-limit@file,middlewares-secure-headers@file"
-      - "traefik.http.routers.paperless-mcp-msg.rule=Host(`paperless-mcp.${DOMAIN}`) && PathPrefix(`/messages`)"
-      - "traefik.http.routers.paperless-mcp-msg.entrypoints=websecure"
-      - "traefik.http.routers.paperless-mcp-msg.service=paperless-mcp-svc"
-      - "traefik.http.routers.paperless-mcp-msg.tls=true"
-      - "traefik.http.routers.paperless-mcp-msg.tls.certresolver=mydnschallenge"
-      - "traefik.http.routers.paperless-mcp-msg.middlewares=middlewares-rate-limit@file,middlewares-secure-headers@file"
-      # Streamable HTTP transport (new, preferred by Claude.ai)
-      - "traefik.http.routers.paperless-mcp-http.rule=Host(`paperless-mcp.${DOMAIN}`) && PathPrefix(`/mcp`)"
-      - "traefik.http.routers.paperless-mcp-http.entrypoints=websecure"
-      - "traefik.http.routers.paperless-mcp-http.service=paperless-mcp-svc"
-      - "traefik.http.routers.paperless-mcp-http.tls=true"
-      - "traefik.http.routers.paperless-mcp-http.tls.certresolver=mydnschallenge"
-      - "traefik.http.routers.paperless-mcp-http.middlewares=middlewares-rate-limit@file,middlewares-secure-headers@file"
-      - "traefik.http.services.paperless-mcp-svc.loadbalancer.server.port=3000"
+      - "traefik.http.routers.paperless-mcp.rule=Host(`paperless-mcp.${DOMAIN}`)"
+      - "traefik.http.routers.paperless-mcp.entrypoints=websecure"
+      - "traefik.http.routers.paperless-mcp.tls=true"
+      - "traefik.http.routers.paperless-mcp.tls.certresolver=mydnschallenge"
+      - "traefik.http.routers.paperless-mcp.middlewares=middlewares-rate-limit@file,middlewares-secure-headers@file"
+      - "traefik.http.services.paperless-mcp.loadbalancer.server.port=3000"
     networks:
       - traefik
       # Add the paperless-ngx stack network so this container can reach
       # http://webserver:8000 (internal Paperless URL).
-      # Set PAPERLESS_NETWORK to the actual network name from your paperless stack,
-      # e.g. "paperless_default" or just "default" in the same compose project.
+      # Set PAPERLESS_NETWORK to the actual network name from your paperless
+      # stack, e.g. "paperless_default" or just "default" in the same compose
+      # project.
       - paperless
 
 networks:
