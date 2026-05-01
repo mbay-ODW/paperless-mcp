@@ -284,23 +284,29 @@ The document tools return JSON data with document IDs that you can use to constr
 
     // ------------------------------------------------------------------
     // Streamable HTTP transport (current MCP spec).
+    // Mounted on BOTH /mcp and /sse (POST) so the same server works
+    // regardless of which URL the user typed into the Claude.ai connector
+    // dialog – modern Claude.ai always uses Streamable-HTTP semantics
+    // (POST + json/event-stream Accept) even when the connector URL
+    // ends in /sse.
     // ------------------------------------------------------------------
-    app.post("/mcp", authMiddleware, async (req, res) => {
-      log.info(`[/mcp POST] new request, body keys=${Object.keys(req.body ?? {}).join(",")}`);
-      log.trace(`[/mcp POST] body: ${JSON.stringify(req.body).slice(0, 500)}`);
+    const streamableHandler: express.RequestHandler = async (req, res) => {
+      const tag = `[stream POST ${req.path}]`;
+      log.info(`${tag} new request, body keys=${Object.keys(req.body ?? {}).join(",")}`);
+      log.trace(`${tag} body: ${JSON.stringify(req.body).slice(0, 500)}`);
       try {
         const transport = new StreamableHTTPServerTransport({
           sessionIdGenerator: undefined,
         });
         res.on("close", () => {
-          log.debug("[/mcp POST] connection closed by client");
+          log.debug(`${tag} connection closed by client`);
           transport.close();
         });
         await server.connect(transport);
         await transport.handleRequest(req, res, req.body);
-        log.debug(`[/mcp POST] handled, response status=${res.statusCode}`);
+        log.debug(`${tag} handled, response status=${res.statusCode}`);
       } catch (error) {
-        log.error("[/mcp POST] handler error:", error);
+        log.error(`${tag} handler error:`, error);
         if (!res.headersSent) {
           res.status(500).json({
             jsonrpc: "2.0",
@@ -309,7 +315,9 @@ The document tools return JSON data with document IDs that you can use to constr
           });
         }
       }
-    });
+    };
+    app.post("/mcp", authMiddleware, streamableHandler);
+    app.post("/sse", authMiddleware, streamableHandler);
 
     app.get("/mcp", (req, res) => {
       log.debug(`[/mcp GET] not allowed (method=${req.method})`);
