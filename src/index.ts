@@ -13,6 +13,33 @@ import { registerDocumentTypeTools } from "./tools/documentTypes";
 import { registerTagTools } from "./tools/tags";
 const { version } = require("../package.json") as { version: string };
 
+// ---------------------------------------------------------------------------
+// Logging – LOG_LEVEL env var: error|warn|info|debug|trace (default: info)
+// ---------------------------------------------------------------------------
+const LOG_LEVELS = ["error", "warn", "info", "debug", "trace"] as const;
+type LogLevel = (typeof LOG_LEVELS)[number];
+const requestedLevel = (process.env.LOG_LEVEL ?? "info").toLowerCase() as LogLevel;
+const activeLevelIdx = Math.max(
+  0,
+  LOG_LEVELS.indexOf(LOG_LEVELS.includes(requestedLevel) ? requestedLevel : "info")
+);
+function lvlEnabled(l: LogLevel): boolean {
+  return LOG_LEVELS.indexOf(l) <= activeLevelIdx;
+}
+const ts = () => new Date().toISOString();
+const log = {
+  error: (...a: unknown[]) =>
+    lvlEnabled("error") && console.error(`[${ts()}] ERROR`, ...a),
+  warn: (...a: unknown[]) =>
+    lvlEnabled("warn") && console.warn(`[${ts()}] WARN `, ...a),
+  info: (...a: unknown[]) =>
+    lvlEnabled("info") && console.log(`[${ts()}] INFO `, ...a),
+  debug: (...a: unknown[]) =>
+    lvlEnabled("debug") && console.log(`[${ts()}] DEBUG`, ...a),
+  trace: (...a: unknown[]) =>
+    lvlEnabled("trace") && console.log(`[${ts()}] TRACE`, ...a),
+};
+
 const {
   values: { baseUrl, token, http: useHttp, port, publicUrl },
 } = parseArgs({
@@ -43,6 +70,13 @@ if (!resolvedBaseUrl || !resolvedToken) {
 }
 
 async function main() {
+  log.info(
+    `paperless-mcp v${version} starting – LOG_LEVEL=${LOG_LEVELS[activeLevelIdx]} transport=${useHttp ? "http" : "stdio"} port=${resolvedPort}`
+  );
+  log.debug(
+    `paperless: baseUrl=${resolvedBaseUrl} publicUrl=${resolvedPublicUrl} token_len=${resolvedToken!.length}`
+  );
+
   // Initialize API client and server once
   const api = new PaperlessAPI(resolvedBaseUrl!, resolvedToken!);
   const server = new McpServer(
@@ -72,39 +106,55 @@ The document tools return JSON data with document IDs that you can use to constr
   registerCorrespondentTools(server, api);
   registerDocumentTypeTools(server, api);
   registerCustomFieldTools(server, api);
+  log.info("Tool groups registered: documents, tags, correspondents, documentTypes, customFields");
 
   if (useHttp) {
     const app = express();
     app.use(express.json());
 
+    // Generic request log – sees EVERY incoming request before routing.
+    app.use((req, _res, next) => {
+      const auth = req.headers.authorization ?? "";
+      const authPreview = auth
+        ? auth.slice(0, 20) + (auth.length > 20 ? "…" : "")
+        : "(none)";
+      log.debug(
+        `→ ${req.method} ${req.originalUrl}  auth=${authPreview}  ip=${req.ip}`
+      );
+      next();
+    });
+
     // ------------------------------------------------------------------
     // OIDC / Bearer auth middleware
-    // Env vars:
-    //   MCP_API_KEY              – static fallback token (optional)
-    //   OIDC_INTROSPECTION_URL   – Authelia introspection endpoint
-    //   OIDC_CLIENT_ID           – client id for introspection auth
-    //   OIDC_CLIENT_SECRET       – client secret for introspection auth
+    // Same logic as hero-mcp:
+    //   1. If MCP_API_KEY is unset → all requests pass (dev mode, warned)
+    //   2. Bearer == MCP_API_KEY → ok
+    //   3. Bearer JWT → introspect against Authelia → active=true → ok
+    //   4. Otherwise → 401
     // ------------------------------------------------------------------
     const mcpApiKey = process.env.MCP_API_KEY ?? "";
     const oidcIntrospectionUrl = process.env.OIDC_INTROSPECTION_URL ?? "";
     const oidcClientId = process.env.OIDC_CLIENT_ID ?? "";
     const oidcClientSecret = process.env.OIDC_CLIENT_SECRET ?? "";
-    // Base URL of the Authelia OAuth/OIDC server (e.g. https://authelia.example.com)
     const oauthIssuer = process.env.OAUTH_ISSUER ?? "";
-    // Public URL of this MCP server (e.g. https://mcp.example.com)
     const mcpServerUrl = process.env.MCP_SERVER_URL ?? "";
 
-    // Log config once at startup so we can verify env vars are loaded
-    console.log("[auth] Config: MCP_API_KEY=%s OIDC_INTROSPECTION_URL=%s OIDC_CLIENT_ID=%s OIDC_CLIENT_SECRET=%s",
-      mcpApiKey ? `set(${mcpApiKey.length} chars)` : "NOT SET",
-      oidcIntrospectionUrl || "NOT SET",
-      oidcClientId || "NOT SET",
-      oidcClientSecret ? `set(${oidcClientSecret.length} chars)` : "NOT SET",
+    log.info(
+      `[auth] config: MCP_API_KEY=${mcpApiKey ? `set(${mcpApiKey.length} chars)` : "NOT SET"} OIDC_INTROSPECTION_URL=${oidcIntrospectionUrl || "NOT SET"} OIDC_CLIENT_ID=${oidcClientId || "NOT SET"} OIDC_CLIENT_SECRET=${oidcClientSecret ? `set(${oidcClientSecret.length} chars)` : "NOT SET"}`
     );
+    log.info(
+      `[oauth-discovery] OAUTH_ISSUER=${oauthIssuer || "NOT SET"} MCP_SERVER_URL=${mcpServerUrl || "NOT SET"}`
+    );
+    if (!mcpApiKey && (!oidcIntrospectionUrl || !oidcClientId || !oidcClientSecret)) {
+      log.warn(
+        "[auth] NEITHER static MCP_API_KEY NOR a complete OIDC triple is configured – ALL requests will be accepted unauthenticated (dev mode)."
+      );
+    }
 
     const isAuthorized = async (req: express.Request): Promise<boolean> => {
+      const tag = `${req.method} ${req.path}`;
       if (!mcpApiKey) {
-        console.log("[auth] No MCP_API_KEY configured – skipping auth");
+        log.debug(`[auth] ${tag} – no MCP_API_KEY configured, passing through`);
         return true;
       }
 
@@ -112,61 +162,83 @@ The document tools return JSON data with document IDs that you can use to constr
       const authPreview = auth
         ? auth.slice(0, 20) + (auth.length > 20 ? "…" : "")
         : "(none)";
-      console.log("[auth] %s %s – Authorization: %s", req.method, req.path, authPreview);
+      log.debug(`[auth] ${tag} – Authorization: ${authPreview}`);
 
       if (!auth) {
-        console.log("[auth] DENIED – no Authorization header");
+        log.warn(`[auth] ${tag} – DENY: no Authorization header`);
         return false;
       }
 
       if (auth === `Bearer ${mcpApiKey}`) {
-        console.log("[auth] OK – static Bearer token matched");
+        log.info(`[auth] ${tag} – OK: static MCP_API_KEY matched`);
         return true;
       }
 
-      if (auth.startsWith("Bearer ")) {
-        if (!oidcIntrospectionUrl || !oidcClientId || !oidcClientSecret) {
-          console.log("[auth] DENIED – JWT received but OIDC not fully configured: url=%s id=%s secret=%s",
-            oidcIntrospectionUrl ? "set" : "MISSING",
-            oidcClientId ? "set" : "MISSING",
-            oidcClientSecret ? "set" : "MISSING",
+      if (!auth.startsWith("Bearer ")) {
+        log.warn(`[auth] ${tag} – DENY: Authorization is not a Bearer scheme`);
+        return false;
+      }
+
+      // Bearer ≠ MCP_API_KEY → try OIDC introspection.
+      if (!oidcIntrospectionUrl || !oidcClientId || !oidcClientSecret) {
+        log.warn(
+          `[auth] ${tag} – DENY: Bearer JWT presented but OIDC introspection not fully configured (url=${
+            oidcIntrospectionUrl ? "ok" : "MISSING"
+          } id=${oidcClientId ? "ok" : "MISSING"} secret=${
+            oidcClientSecret ? "ok" : "MISSING"
+          })`
+        );
+        return false;
+      }
+
+      const jwtToken = auth.slice(7);
+      log.debug(
+        `[auth] ${tag} – introspecting token (len=${jwtToken.length}) against ${oidcIntrospectionUrl}`
+      );
+      const startedAt = Date.now();
+      try {
+        const credentials = Buffer.from(
+          `${oidcClientId}:${oidcClientSecret}`
+        ).toString("base64");
+        const resp = await fetch(oidcIntrospectionUrl, {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/x-www-form-urlencoded",
+            Authorization: `Basic ${credentials}`,
+          },
+          body: `token=${encodeURIComponent(jwtToken)}`,
+          signal: AbortSignal.timeout(5000),
+        });
+        const elapsed = Date.now() - startedAt;
+        const body = await resp.text();
+        log.debug(
+          `[auth] ${tag} – introspection HTTP ${resp.status} in ${elapsed}ms, body: ${body.slice(0, 300)}`
+        );
+        if (resp.status !== 200) {
+          log.warn(
+            `[auth] ${tag} – DENY: introspection returned non-200 (${resp.status})`
           );
           return false;
         }
-
-        const jwtToken = auth.slice(7);
-        console.log("[auth] JWT token received (len=%d), calling introspection: %s", jwtToken.length, oidcIntrospectionUrl);
-        try {
-          const credentials = Buffer.from(
-            `${oidcClientId}:${oidcClientSecret}`
-          ).toString("base64");
-          const resp = await fetch(oidcIntrospectionUrl, {
-            method: "POST",
-            headers: {
-              "Content-Type": "application/x-www-form-urlencoded",
-              Authorization: `Basic ${credentials}`,
-            },
-            body: `token=${encodeURIComponent(jwtToken)}`,
-            signal: AbortSignal.timeout(5000),
-          });
-          const body = await resp.text();
-          console.log("[auth] Introspection HTTP %d – body: %s", resp.status, body.slice(0, 200));
-          const data = JSON.parse(body) as { active?: boolean };
-          if (data.active === true) {
-            console.log("[auth] OK – OIDC token active");
-            return true;
-          } else {
-            console.log("[auth] DENIED – OIDC token not active");
-            return false;
-          }
-        } catch (e) {
-          console.error("[auth] Introspection error:", e);
-          return false;
+        const data = JSON.parse(body) as {
+          active?: boolean;
+          sub?: string;
+          scope?: string;
+          aud?: string;
+          exp?: number;
+        };
+        if (data.active === true) {
+          log.info(
+            `[auth] ${tag} – OK: OIDC token active sub=${data.sub ?? "?"} scope=${data.scope ?? "?"}`
+          );
+          return true;
         }
+        log.warn(`[auth] ${tag} – DENY: OIDC token not active`);
+        return false;
+      } catch (e) {
+        log.error(`[auth] ${tag} – introspection exception:`, e);
+        return false;
       }
-
-      console.log("[auth] DENIED – Authorization header is not a Bearer token");
-      return false;
     };
 
     const authMiddleware: express.RequestHandler = async (req, res, next) => {
@@ -177,14 +249,14 @@ The document tools return JSON data with document IDs that you can use to constr
     // Store transports for each session
     const sseTransports: Record<string, SSEServerTransport> = {};
 
-    // Both discovery endpoints must be BEFORE authMiddleware – publicly
-    // accessible so Claude.ai can bootstrap the OAuth flow without a token.
-
-    // RFC 9728 – OAuth 2.0 Protected Resource Metadata
-    // Claude.ai fetches this FIRST to find out which authorization server
-    // protects this resource.
+    // ------------------------------------------------------------------
+    // Public OAuth discovery endpoints (RFC 9728 + RFC 8414).
+    // Mounted BEFORE auth so Claude.ai can bootstrap the OAuth flow.
+    // Only registered when OAUTH_ISSUER is set.
+    // ------------------------------------------------------------------
     if (oauthIssuer && mcpServerUrl) {
       app.get("/.well-known/oauth-protected-resource", (_req, res) => {
+        log.info("[discovery] /.well-known/oauth-protected-resource hit");
         res.json({
           resource: mcpServerUrl,
           authorization_servers: [oauthIssuer],
@@ -193,11 +265,9 @@ The document tools return JSON data with document IDs that you can use to constr
         });
       });
     }
-
-    // RFC 8414 – OAuth 2.0 Authorization Server Metadata
-    // Describes all Authelia endpoints Claude.ai needs for the OAuth flow.
     if (oauthIssuer) {
       app.get("/.well-known/oauth-authorization-server", (_req, res) => {
+        log.info("[discovery] /.well-known/oauth-authorization-server hit");
         res.json({
           issuer: oauthIssuer,
           authorization_endpoint: `${oauthIssuer}/api/oidc/authorization`,
@@ -212,76 +282,85 @@ The document tools return JSON data with document IDs that you can use to constr
       });
     }
 
+    // ------------------------------------------------------------------
+    // Streamable HTTP transport (current MCP spec).
+    // ------------------------------------------------------------------
     app.post("/mcp", authMiddleware, async (req, res) => {
+      log.info(`[/mcp POST] new request, body keys=${Object.keys(req.body ?? {}).join(",")}`);
+      log.trace(`[/mcp POST] body: ${JSON.stringify(req.body).slice(0, 500)}`);
       try {
         const transport = new StreamableHTTPServerTransport({
           sessionIdGenerator: undefined,
         });
         res.on("close", () => {
+          log.debug("[/mcp POST] connection closed by client");
           transport.close();
         });
         await server.connect(transport);
         await transport.handleRequest(req, res, req.body);
+        log.debug(`[/mcp POST] handled, response status=${res.statusCode}`);
       } catch (error) {
-        console.error("Error handling MCP request:", error);
+        log.error("[/mcp POST] handler error:", error);
         if (!res.headersSent) {
           res.status(500).json({
             jsonrpc: "2.0",
-            error: {
-              code: -32603,
-              message: "Internal server error",
-            },
+            error: { code: -32603, message: "Internal server error" },
             id: null,
           });
         }
       }
     });
 
-    app.get("/mcp", async (req, res) => {
+    app.get("/mcp", (req, res) => {
+      log.debug(`[/mcp GET] not allowed (method=${req.method})`);
       res.writeHead(405).end(
         JSON.stringify({
           jsonrpc: "2.0",
-          error: {
-            code: -32000,
-            message: "Method not allowed.",
-          },
+          error: { code: -32000, message: "Method not allowed." },
           id: null,
         })
       );
     });
 
-    app.delete("/mcp", async (req, res) => {
+    app.delete("/mcp", (req, res) => {
+      log.debug(`[/mcp DELETE] not allowed`);
       res.writeHead(405).end(
         JSON.stringify({
           jsonrpc: "2.0",
-          error: {
-            code: -32000,
-            message: "Method not allowed.",
-          },
+          error: { code: -32000, message: "Method not allowed." },
           id: null,
         })
       );
     });
 
-    app.get("/sse", authMiddleware, async (req, res) => {
-      console.log("SSE request received");
+    // ------------------------------------------------------------------
+    // SSE transport (legacy MCP spec; Claude Desktop, older Claude.ai).
+    // ------------------------------------------------------------------
+    app.get("/sse", authMiddleware, async (_req, res) => {
+      log.info("[/sse GET] new SSE connection");
       try {
         const transport = new SSEServerTransport("/messages", res);
         sseTransports[transport.sessionId] = transport;
+        log.info(
+          `[/sse GET] sessionId=${transport.sessionId} – transport registered (active sessions: ${Object.keys(sseTransports).length})`
+        );
         res.on("close", () => {
+          log.info(
+            `[/sse GET] sessionId=${transport.sessionId} – connection closed (remaining sessions: ${
+              Object.keys(sseTransports).length - 1
+            })`
+          );
           delete sseTransports[transport.sessionId];
           transport.close();
         });
         await server.connect(transport);
+        log.debug(`[/sse GET] sessionId=${transport.sessionId} – server.connect completed`);
       } catch (error) {
-        console.error("Error handling SSE request:", error);
+        log.error("[/sse GET] error:", error);
         if (!res.headersSent) {
           res.status(500).json({
             jsonrpc: "2.0",
-            error: {
-              code: -32603,
-              message: "Internal server error",
-            },
+            error: { code: -32603, message: "Internal server error" },
             id: null,
           });
         }
@@ -290,24 +369,48 @@ The document tools return JSON data with document IDs that you can use to constr
 
     app.post("/messages", authMiddleware, async (req, res) => {
       const sessionId = req.query.sessionId as string;
+      log.debug(
+        `[/messages POST] sessionId=${sessionId} body keys=${Object.keys(req.body ?? {}).join(",")}`
+      );
+      log.trace(`[/messages POST] body: ${JSON.stringify(req.body).slice(0, 500)}`);
       const transport = sseTransports[sessionId];
-      if (transport) {
-        await transport.handlePostMessage(req, res, req.body);
-      } else {
+      if (!transport) {
+        log.warn(
+          `[/messages POST] sessionId=${sessionId} – no transport found (known: ${Object.keys(sseTransports).join(",") || "none"})`
+        );
         res.status(400).send("No transport found for sessionId");
+        return;
+      }
+      try {
+        await transport.handlePostMessage(req, res, req.body);
+        log.debug(`[/messages POST] sessionId=${sessionId} – handled, status=${res.statusCode}`);
+      } catch (error) {
+        log.error(`[/messages POST] sessionId=${sessionId} – error:`, error);
+        if (!res.headersSent) res.status(500).send("Internal server error");
       }
     });
 
+    // Catch-all for unmatched routes – often the actual cause of "Not connected".
+    app.use((req, res) => {
+      log.warn(
+        `[404] ${req.method} ${req.originalUrl} – no route matched. Headers: ${JSON.stringify(req.headers).slice(0, 300)}`
+      );
+      res.status(404).json({ error: "Not found", path: req.originalUrl });
+    });
+
     app.listen(resolvedPort, () => {
-      console.log(
-        `MCP Stateless Streamable HTTP Server listening on port ${resolvedPort}`
+      log.info(
+        `MCP server listening on :${resolvedPort} (routes: /mcp /sse /messages /.well-known/*)`
       );
     });
-    // await new Promise((resolve) => setTimeout(resolve, 1000000));
   } else {
+    log.info("starting on stdio");
     const transport = new StdioServerTransport();
     await server.connect(transport);
   }
 }
 
-main().catch((e) => console.error(e.message));
+main().catch((e) => {
+  log.error("fatal:", e);
+  process.exit(1);
+});
