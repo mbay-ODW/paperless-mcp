@@ -248,22 +248,26 @@ The document tools return JSON data with document IDs that you can use to constr
     };
 
     /**
-     * Send a 401 with an RFC 6750-compliant WWW-Authenticate header so the
-     * OAuth client knows whether to refresh its token or re-prompt the user.
-     *   - reason "invalid_token" → triggers the refresh-token flow on the
-     *     client (Claude.ai) without the user having to reconnect
-     *   - reason "no_header" → initial auth challenge
+     * Send a 401.
+     *   - reason "invalid_token" → emit an RFC 6750 WWW-Authenticate
+     *     `Bearer error="invalid_token"` challenge. This is what
+     *     triggers Claude.ai's silent refresh-token flow.
+     *   - reason "no_header" → emit a "naked" 401 WITHOUT a
+     *     WWW-Authenticate header. Sending `Bearer realm="…"` here
+     *     would short-circuit Claude.ai's OAuth discovery (which
+     *     fetches /.well-known/oauth-authorization-server) – the
+     *     client treats `realm`-only challenges as plain Bearer auth.
      */
     const sendUnauthorized = (
       res: express.Response,
       reason: "no_header" | "invalid_token" = "no_header"
     ) => {
-      const realm = "paperless-mcp";
-      const www =
-        reason === "invalid_token"
-          ? `Bearer realm="${realm}", error="invalid_token", error_description="The access token expired or is invalid"`
-          : `Bearer realm="${realm}"`;
-      res.set("WWW-Authenticate", www);
+      if (reason === "invalid_token") {
+        res.set(
+          "WWW-Authenticate",
+          'Bearer realm="paperless-mcp", error="invalid_token", error_description="The access token expired or is invalid"'
+        );
+      }
       res.status(401).json({ error: "Unauthorized" });
     };
 
