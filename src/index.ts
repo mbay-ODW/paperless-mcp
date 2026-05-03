@@ -151,11 +151,17 @@ The document tools return JSON data with document IDs that you can use to constr
       );
     }
 
-    const isAuthorized = async (req: express.Request): Promise<boolean> => {
+    // Auth result: ok + reason ∈ {undefined, "no_header", "invalid_token"}.
+    // The reason drives the WWW-Authenticate header on 401 responses so the
+    // OAuth client (Claude.ai) can distinguish "refresh your token" from
+    // "start over with a fresh authorization".
+    type AuthResult = { ok: true } | { ok: false; reason: "no_header" | "invalid_token" };
+
+    const isAuthorized = async (req: express.Request): Promise<AuthResult> => {
       const tag = `${req.method} ${req.path}`;
       if (!mcpApiKey) {
         log.debug(`[auth] ${tag} – no MCP_API_KEY configured, passing through`);
-        return true;
+        return { ok: true };
       }
 
       const auth = req.headers.authorization ?? "";
@@ -166,17 +172,17 @@ The document tools return JSON data with document IDs that you can use to constr
 
       if (!auth) {
         log.warn(`[auth] ${tag} – DENY: no Authorization header`);
-        return false;
+        return { ok: false, reason: "no_header" };
       }
 
       if (auth === `Bearer ${mcpApiKey}`) {
         log.info(`[auth] ${tag} – OK: static MCP_API_KEY matched`);
-        return true;
+        return { ok: true };
       }
 
       if (!auth.startsWith("Bearer ")) {
         log.warn(`[auth] ${tag} – DENY: Authorization is not a Bearer scheme`);
-        return false;
+        return { ok: false, reason: "invalid_token" };
       }
 
       // Bearer ≠ MCP_API_KEY → try OIDC introspection.
@@ -188,7 +194,7 @@ The document tools return JSON data with document IDs that you can use to constr
             oidcClientSecret ? "ok" : "MISSING"
           })`
         );
-        return false;
+        return { ok: false, reason: "invalid_token" };
       }
 
       const jwtToken = auth.slice(7);
@@ -218,7 +224,7 @@ The document tools return JSON data with document IDs that you can use to constr
           log.warn(
             `[auth] ${tag} – DENY: introspection returned non-200 (${resp.status})`
           );
-          return false;
+          return { ok: false, reason: "invalid_token" };
         }
         const data = JSON.parse(body) as {
           active?: boolean;
@@ -231,19 +237,40 @@ The document tools return JSON data with document IDs that you can use to constr
           log.info(
             `[auth] ${tag} – OK: OIDC token active sub=${data.sub ?? "?"} scope=${data.scope ?? "?"}`
           );
-          return true;
+          return { ok: true };
         }
         log.warn(`[auth] ${tag} – DENY: OIDC token not active`);
-        return false;
+        return { ok: false, reason: "invalid_token" };
       } catch (e) {
         log.error(`[auth] ${tag} – introspection exception:`, e);
-        return false;
+        return { ok: false, reason: "invalid_token" };
       }
     };
 
-    const authMiddleware: express.RequestHandler = async (req, res, next) => {
-      if (await isAuthorized(req)) return next();
+    /**
+     * Send a 401 with an RFC 6750-compliant WWW-Authenticate header so the
+     * OAuth client knows whether to refresh its token or re-prompt the user.
+     *   - reason "invalid_token" → triggers the refresh-token flow on the
+     *     client (Claude.ai) without the user having to reconnect
+     *   - reason "no_header" → initial auth challenge
+     */
+    const sendUnauthorized = (
+      res: express.Response,
+      reason: "no_header" | "invalid_token" = "no_header"
+    ) => {
+      const realm = "paperless-mcp";
+      const www =
+        reason === "invalid_token"
+          ? `Bearer realm="${realm}", error="invalid_token", error_description="The access token expired or is invalid"`
+          : `Bearer realm="${realm}"`;
+      res.set("WWW-Authenticate", www);
       res.status(401).json({ error: "Unauthorized" });
+    };
+
+    const authMiddleware: express.RequestHandler = async (req, res, next) => {
+      const result = await isAuthorized(req);
+      if (result.ok) return next();
+      sendUnauthorized(res, result.reason);
     };
 
     // Store transports for each session
