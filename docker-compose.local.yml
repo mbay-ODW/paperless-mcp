@@ -1,0 +1,36 @@
+# Local development stack – binds to 127.0.0.1 only, no Traefik, no
+# Authelia, no TLS. Reads Paperless credentials from a local .env.
+#
+# Usage:
+#   cp .env.example .env   # set PAPERLESS_URL + PAPERLESS_API_KEY
+#   docker compose -f docker-compose.local.yml up
+#
+# Connect from Claude Desktop with:
+#   {"mcpServers": {"paperless-local": {"url": "http://localhost:8003/sse"}}}
+#
+# Auth is intentionally disabled – do NOT expose this port to the network.
+services:
+  paperless-mcp:
+    image: ghcr.io/mbay-odw/paperless-mcp:latest
+    container_name: paperless-mcp-local
+    restart: unless-stopped
+    # The TS image entrypoint takes flags; for local use we keep them
+    # explicit so it works without a separate stack.env.
+    command:
+      - "--http"
+      - "--port"
+      - "3000"
+      - "--baseUrl"
+      - "${PAPERLESS_URL}"
+      - "--token"
+      - "${PAPERLESS_API_KEY}"
+      - "--publicUrl"
+      - "${PAPERLESS_PUBLIC_URL:-${PAPERLESS_URL}}"
+    environment:
+      - LOG_LEVEL=${LOG_LEVEL:-debug}
+      - PAPERLESS_URL=${PAPERLESS_URL}
+      - PAPERLESS_API_KEY=${PAPERLESS_API_KEY}
+      - PAPERLESS_PUBLIC_URL=${PAPERLESS_PUBLIC_URL:-${PAPERLESS_URL}}
+      # Auth deliberately not set → all requests pass through.
+    ports:
+      - "127.0.0.1:8003:3000"
