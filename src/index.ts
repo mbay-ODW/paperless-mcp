@@ -3,6 +3,8 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { SSEServerTransport } from "@modelcontextprotocol/sdk/server/sse.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
+import { isInitializeRequest } from "@modelcontextprotocol/sdk/types.js";
+import { randomUUID } from "node:crypto";
 import express from "express";
 import { parseArgs } from "node:util";
 import { PaperlessAPI } from "./api/PaperlessAPI";
@@ -314,26 +316,78 @@ The document tools return JSON data with document IDs that you can use to constr
     }
 
     // ------------------------------------------------------------------
-    // Streamable HTTP transport (current MCP spec).
+    // Streamable HTTP transport (current MCP spec) – STATEFUL.
+    //
     // Mounted on BOTH /mcp and /sse (POST) so the same server works
     // regardless of which URL the user typed into the Claude.ai connector
     // dialog – modern Claude.ai always uses Streamable-HTTP semantics
     // (POST + json/event-stream Accept) even when the connector URL
     // ends in /sse.
+    //
+    // Stateful: the first request (Initialize) creates a transport,
+    // subsequent requests carrying the same `mcp-session-id` header
+    // reuse that transport instance. A stateless transport would
+    // reject every call after the first with "Received request before
+    // initialization was complete" – Claude.ai expects to initialize
+    // ONCE and then send many tool calls on the same session.
     // ------------------------------------------------------------------
+    const streamableTransports: Record<string, StreamableHTTPServerTransport> =
+      {};
+
     const streamableHandler: express.RequestHandler = async (req, res) => {
       const tag = `[stream POST ${req.path}]`;
-      log.info(`${tag} new request, body keys=${Object.keys(req.body ?? {}).join(",")}`);
+      const incomingSessionId = (req.headers["mcp-session-id"] as
+        | string
+        | undefined) ?? undefined;
+      log.debug(
+        `${tag} session=${incomingSessionId ?? "(new)"} body keys=${Object.keys(req.body ?? {}).join(",")}`
+      );
       log.trace(`${tag} body: ${JSON.stringify(req.body).slice(0, 500)}`);
+
       try {
-        const transport = new StreamableHTTPServerTransport({
-          sessionIdGenerator: undefined,
-        });
-        res.on("close", () => {
-          log.debug(`${tag} connection closed by client`);
-          transport.close();
-        });
-        await server.connect(transport);
+        let transport: StreamableHTTPServerTransport;
+
+        if (incomingSessionId && streamableTransports[incomingSessionId]) {
+          // Reuse existing transport for this session.
+          transport = streamableTransports[incomingSessionId];
+        } else if (!incomingSessionId && isInitializeRequest(req.body)) {
+          // Brand-new session – create a transport, register it on
+          // session-init, and clean it up on close.
+          transport = new StreamableHTTPServerTransport({
+            sessionIdGenerator: () => randomUUID(),
+            onsessioninitialized: (sid) => {
+              log.info(`${tag} session initialized: ${sid}`);
+              streamableTransports[sid] = transport;
+            },
+          });
+          transport.onclose = () => {
+            if (transport.sessionId) {
+              log.info(
+                `${tag} session closed: ${transport.sessionId} (remaining: ${
+                  Object.keys(streamableTransports).length - 1
+                })`
+              );
+              delete streamableTransports[transport.sessionId];
+            }
+          };
+          await server.connect(transport);
+        } else {
+          // Non-initialize request without a known session id.
+          log.warn(
+            `${tag} bad request – no session id and not an initialize call`
+          );
+          res.status(400).json({
+            jsonrpc: "2.0",
+            error: {
+              code: -32000,
+              message:
+                "Bad Request: no valid session id and not an initialize call",
+            },
+            id: null,
+          });
+          return;
+        }
+
         await transport.handleRequest(req, res, req.body);
         log.debug(`${tag} handled, response status=${res.statusCode}`);
       } catch (error) {
@@ -347,30 +401,29 @@ The document tools return JSON data with document IDs that you can use to constr
         }
       }
     };
+
+    // Streamable HTTP also supports GET (server-to-client SSE stream)
+    // and DELETE (client-side session termination) on the same path.
+    const streamableSessionLookupHandler: express.RequestHandler = async (
+      req,
+      res
+    ) => {
+      const sid = req.headers["mcp-session-id"] as string | undefined;
+      if (!sid || !streamableTransports[sid]) {
+        res.status(400).json({
+          jsonrpc: "2.0",
+          error: { code: -32000, message: "Invalid or missing session id" },
+          id: null,
+        });
+        return;
+      }
+      await streamableTransports[sid].handleRequest(req, res);
+    };
+
     app.post("/mcp", authMiddleware, streamableHandler);
     app.post("/sse", authMiddleware, streamableHandler);
-
-    app.get("/mcp", (req, res) => {
-      log.debug(`[/mcp GET] not allowed (method=${req.method})`);
-      res.writeHead(405).end(
-        JSON.stringify({
-          jsonrpc: "2.0",
-          error: { code: -32000, message: "Method not allowed." },
-          id: null,
-        })
-      );
-    });
-
-    app.delete("/mcp", (req, res) => {
-      log.debug(`[/mcp DELETE] not allowed`);
-      res.writeHead(405).end(
-        JSON.stringify({
-          jsonrpc: "2.0",
-          error: { code: -32000, message: "Method not allowed." },
-          id: null,
-        })
-      );
-    });
+    app.get("/mcp", authMiddleware, streamableSessionLookupHandler);
+    app.delete("/mcp", authMiddleware, streamableSessionLookupHandler);
 
     // ------------------------------------------------------------------
     // SSE transport (legacy MCP spec; Claude Desktop, older Claude.ai).
