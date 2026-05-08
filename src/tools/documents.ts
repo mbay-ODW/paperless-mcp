@@ -265,21 +265,48 @@ export function registerDocumentTools(server: McpServer, api: PaperlessAPI) {
     withErrorHandling(async (args, extra) => {
       if (!api) throw new Error("Please configure API connection first");
       const response = await api.downloadDocument(args.id, args.original);
-      const filename =
-        (typeof response.headers.get === "function"
+
+      // Pull the original filename out of Content-Disposition (axios returns
+      // headers either as a Map-like object or a plain dict depending on
+      // the adapter, hence the dual access).
+      const cdRaw =
+        typeof response.headers.get === "function"
           ? response.headers.get("content-disposition")
-          : response.headers["content-disposition"]
-        )
-          ?.split("filename=")[1]
-          ?.replace(/"/g, "") || `document-${args.id}`;
+          : response.headers["content-disposition"];
+      const filename =
+        cdRaw?.split("filename=")[1]?.replace(/"/g, "") ||
+        `document-${args.id}.pdf`;
+
+      // The Paperless API echoes the actual MIME type back; default to
+      // application/pdf since that's what `?original=false` returns.
+      const ctRaw =
+        typeof response.headers.get === "function"
+          ? response.headers.get("content-type")
+          : response.headers["content-type"];
+      const mimeType = (ctRaw ?? "application/pdf").split(";")[0].trim();
+
+      // RFC 3986: an MCP resource `uri` must have a scheme. `document-1583.pdf`
+      // alone is rejected by the SDK validator with "malformed response".
+      // We synthesise a `paperless://documents/<id>/<filename>` URI so the
+      // resource is uniquely identifiable and the validator is happy.
+      const safeName = encodeURIComponent(filename);
+      const uri = `paperless://documents/${args.id}/${safeName}`;
+
+      // axios `responseType: "arraybuffer"` gives us an ArrayBuffer in the
+      // browser/edge runtimes and a Buffer in Node. Wrap in Uint8Array to
+      // get a consistent base64 round-trip on either.
+      const blob = Buffer.from(new Uint8Array(response.data)).toString(
+        "base64"
+      );
+
       return {
         content: [
           {
             type: "resource",
             resource: {
-              uri: filename,
-              blob: Buffer.from(response.data).toString("base64"),
-              mimeType: "application/pdf",
+              uri,
+              blob,
+              mimeType,
             },
           },
         ],
@@ -296,14 +323,30 @@ export function registerDocumentTools(server: McpServer, api: PaperlessAPI) {
     withErrorHandling(async (args, extra) => {
       if (!api) throw new Error("Please configure API connection first");
       const response = await api.getThumbnail(args.id);
+
+      const ctRaw =
+        typeof response.headers.get === "function"
+          ? response.headers.get("content-type")
+          : response.headers["content-type"];
+      const mimeType = (ctRaw ?? "image/webp").split(";")[0].trim();
+
+      // Use a real URI (scheme + path) so the MCP SDK validator accepts the
+      // resource – passing `document-<id>-thumb.webp` alone produced
+      // "malformed response" on the client side.
+      const uri = `paperless://documents/${args.id}/thumbnail`;
+
+      const blob = Buffer.from(new Uint8Array(response.data)).toString(
+        "base64"
+      );
+
       return {
         content: [
           {
             type: "resource",
             resource: {
-              uri: `document-${args.id}-thumb.webp`,
-              blob: Buffer.from(response.data).toString("base64"),
-              mimeType: "image/webp",
+              uri,
+              blob,
+              mimeType,
             },
           },
         ],
