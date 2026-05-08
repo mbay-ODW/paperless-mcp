@@ -315,6 +315,88 @@ export function registerDocumentTools(server: McpServer, api: PaperlessAPI) {
   );
 
   server.tool(
+    "bulk_download_documents",
+    [
+      "Download multiple documents in one call as a single ZIP archive.",
+      "Wraps the Paperless /api/documents/bulk_download/ endpoint and",
+      "returns the ZIP as a base64 resource (mimeType application/zip).",
+      "",
+      "Heads-up: the response is base64-encoded and travels through the",
+      "MCP context window – stay below ~10-20 MB of total document size",
+      "to avoid blowing the LLM's context. For larger batches, narrow the",
+      "ID list, set content='archive' (smaller than 'both'), or call",
+      "download_document per id and stream out-of-band.",
+    ].join(" "),
+    {
+      ids: z
+        .array(z.number())
+        .min(1)
+        .describe("List of document IDs to include in the archive"),
+      content: z
+        .enum(["archive", "originals", "both"])
+        .optional()
+        .describe(
+          "Which file copy to include (default: 'archive' – the OCR'd PDF view)"
+        ),
+      compression: z
+        .enum(["none", "deflated", "bzip2", "lzma"])
+        .optional()
+        .describe(
+          "ZIP entry compression. 'none' is fastest; PDFs don't shrink further."
+        ),
+      follow_formatting: z
+        .boolean()
+        .optional()
+        .describe(
+          "If true, mirror the on-disk directory layout configured in Paperless's filename-formatting setting"
+        ),
+    },
+    withErrorHandling(async (args, extra) => {
+      if (!api) throw new Error("Please configure API connection first");
+      const response = await api.bulkDownload(
+        args.ids,
+        args.content ?? "archive",
+        args.compression ?? "none",
+        args.follow_formatting ?? false
+      );
+
+      // Filename hint from Content-Disposition (Paperless sets one) → fallback.
+      const cdRaw =
+        typeof response.headers.get === "function"
+          ? response.headers.get("content-disposition")
+          : response.headers["content-disposition"];
+      const filename =
+        cdRaw?.split("filename=")[1]?.replace(/"/g, "") || "documents.zip";
+
+      const ctRaw =
+        typeof response.headers.get === "function"
+          ? response.headers.get("content-type")
+          : response.headers["content-type"];
+      const mimeType = (ctRaw ?? "application/zip").split(";")[0].trim();
+
+      const safeName = encodeURIComponent(filename);
+      const uri = `paperless://documents/bulk/${safeName}`;
+
+      const blob = Buffer.from(new Uint8Array(response.data)).toString(
+        "base64"
+      );
+
+      return {
+        content: [
+          {
+            type: "resource",
+            resource: {
+              uri,
+              blob,
+              mimeType,
+            },
+          },
+        ],
+      };
+    })
+  );
+
+  server.tool(
     "get_document_thumbnail",
     "Get a document thumbnail (image preview) by ID. Returns the thumbnail as a base64-encoded WebP image resource.",
     {

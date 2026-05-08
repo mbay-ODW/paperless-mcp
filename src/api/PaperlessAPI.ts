@@ -196,6 +196,46 @@ export class PaperlessAPI {
     return response;
   }
 
+  /**
+   * Bulk-download multiple documents as a ZIP archive via Paperless's
+   * `/api/documents/bulk_download/` endpoint.
+   *
+   * - `content`: which file copy to include (`archive` is the default
+   *   PDF-after-OCR view, `originals` is exactly what was uploaded,
+   *   `both` packs both side-by-side).
+   * - `compression`: ZIP entry compression. `none` is fastest and
+   *   produces the smallest base64 payload over the wire (PDFs are
+   *   already compressed); `deflated` / `bzip2` / `lzma` shrink only
+   *   text-heavy originals.
+   * - `follow_formatting`: when `true`, the archive uses the same
+   *   directory structure that Paperless's filename-formatting setting
+   *   would produce on disk.
+   */
+  async bulkDownload(
+    ids: number[],
+    content: "archive" | "originals" | "both" = "archive",
+    compression: "none" | "deflated" | "bzip2" | "lzma" = "none",
+    follow_formatting = false
+  ): Promise<AxiosResponse<ArrayBuffer>> {
+    const response = await axios.post<ArrayBuffer>(
+      `${this.baseUrl}/api/documents/bulk_download/`,
+      {
+        documents: ids,
+        content,
+        compression,
+        follow_formatting,
+      },
+      {
+        headers: {
+          Authorization: `Token ${this.token}`,
+          "Content-Type": "application/json",
+        },
+        responseType: "arraybuffer",
+      }
+    );
+    return response;
+  }
+
   // Tag operations
   async getTags(): Promise<GetTagsResponse> {
     return this.request<GetTagsResponse>("/tags/");
