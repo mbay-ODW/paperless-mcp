@@ -21,6 +21,15 @@ services:
       - MCP_SERVER_URL=${MCP_SERVER_URL:-https://paperless-mcp.${DOMAIN}}
       # Logging level: error | warn | info | debug | trace
       - LOG_LEVEL=${LOG_LEVEL:-info}
+      # Where the export_documents_to_volume tool writes ZIPs inside the
+      # container. Map this to a host path you can read from your file
+      # browser (Synology File Station, SMB share, …) – see volumes:.
+      - PAPERLESS_EXPORT_DIR=${PAPERLESS_EXPORT_DIR:-/data/exports}
+    volumes:
+      # Host directory where bulk-export ZIPs land. Point this at a path
+      # you can reach from your file browser. Default lives next to the
+      # compose file; override via PAPERLESS_EXPORT_HOST_DIR.
+      - ${PAPERLESS_EXPORT_HOST_DIR:-./paperless-exports}:/data/exports
     expose:
       - "3000"
     # Single Host(...) router – all paths under paperless-mcp.${DOMAIN} go to

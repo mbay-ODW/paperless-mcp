@@ -1,11 +1,19 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp";
 import { z } from "zod";
+import * as fs from "node:fs/promises";
+import * as path from "node:path";
 import { convertDocsWithNames } from "../api/documentEnhancer";
 import { PaperlessAPI } from "../api/PaperlessAPI";
 import { arrayNotEmpty, objectNotEmpty } from "./utils/empty";
 import { withErrorHandling } from "./utils/middlewares";
 import { validateCustomFields } from "./utils/monetary";
 import { CUSTOM_FIELD_VALUE_DESCRIPTION } from "./utils/descriptions";
+
+// Container-side directory the export tool writes ZIPs into. The host
+// path is configured via the docker-compose volume mount; the value
+// here is just the in-container mount point. Defaults to /data/exports
+// (matches the convention used in docker-compose.yml).
+const EXPORT_DIR = process.env.PAPERLESS_EXPORT_DIR ?? "/data/exports";
 
 export function registerDocumentTools(server: McpServer, api: PaperlessAPI) {
   server.tool(
@@ -315,6 +323,118 @@ export function registerDocumentTools(server: McpServer, api: PaperlessAPI) {
   );
 
   server.tool(
+    "export_documents_to_volume",
+    [
+      "Download multiple documents as a ZIP and write it directly to a",
+      "host-mounted volume on the server – the file does NOT travel",
+      "through Claude's context window. Use this for any export larger",
+      "than a handful of documents.",
+      "",
+      "The container writes the ZIP into the directory specified by the",
+      "PAPERLESS_EXPORT_DIR env var (default: /data/exports). Mount that",
+      "directory to a host path in your docker-compose.yml, e.g.:",
+      "  volumes:",
+      "    - /volume1/docker/Paperless-MCP/exports:/data/exports",
+      "",
+      "The tool returns only the resulting filename + container/host",
+      "path + size, never the bytes. Pick the file up via SMB / SFTP /",
+      "Synology File Station / similar from the host path.",
+    ].join(" "),
+    {
+      ids: z
+        .array(z.number())
+        .min(1)
+        .describe("List of document IDs to include in the archive"),
+      filename: z
+        .string()
+        .optional()
+        .describe(
+          "Optional filename for the ZIP (default: paperless-export-<timestamp>.zip). Subdirectories not allowed; basename only."
+        ),
+      content: z
+        .enum(["archive", "originals", "both"])
+        .optional()
+        .describe(
+          "Which file copy to include (default: 'archive' – the OCR'd PDF view)"
+        ),
+      compression: z
+        .enum(["none", "deflated", "bzip2", "lzma"])
+        .optional()
+        .describe(
+          "ZIP entry compression. 'none' is fastest; PDFs don't shrink further."
+        ),
+      follow_formatting: z
+        .boolean()
+        .optional()
+        .describe(
+          "If true, mirror the on-disk directory layout configured in Paperless's filename-formatting setting"
+        ),
+    },
+    withErrorHandling(async (args, extra) => {
+      if (!api) throw new Error("Please configure API connection first");
+
+      // Resolve target filename. Strip any directory components – the
+      // user shouldn't be able to escape the export dir via "../etc".
+      const baseName = path
+        .basename(
+          args.filename ??
+            `paperless-export-${new Date()
+              .toISOString()
+              .replace(/[:.]/g, "-")
+              .replace(/T/, "_")
+              .replace(/Z$/, "")}.zip`
+        )
+        .replace(/[/\\]/g, "_");
+      const fullPath = path.join(EXPORT_DIR, baseName);
+
+      // Make sure the export dir exists – if the user forgot to mount it
+      // we want a clear error instead of a cryptic ENOENT.
+      try {
+        await fs.mkdir(EXPORT_DIR, { recursive: true });
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        throw new Error(
+          `Cannot create export directory ${EXPORT_DIR}: ${msg}. ` +
+            `Make sure it is mounted as a volume in docker-compose.yml ` +
+            `(e.g. - /volume1/.../exports:/data/exports) and writable by ` +
+            `the container user.`
+        );
+      }
+
+      const response = await api.bulkDownload(
+        args.ids,
+        args.content ?? "archive",
+        args.compression ?? "none",
+        args.follow_formatting ?? false
+      );
+
+      const bytes = new Uint8Array(response.data);
+      await fs.writeFile(fullPath, bytes);
+
+      return {
+        content: [
+          {
+            type: "text",
+            text: JSON.stringify(
+              {
+                ok: true,
+                document_count: args.ids.length,
+                container_path: fullPath,
+                filename: baseName,
+                size_bytes: bytes.byteLength,
+                size_human: formatBytes(bytes.byteLength),
+                hint: `File written inside the container at ${fullPath}. Pick it up from the host directory you mounted to ${EXPORT_DIR} (typically a Synology/NAS share).`,
+              },
+              null,
+              2
+            ),
+          },
+        ],
+      };
+    })
+  );
+
+  server.tool(
     "bulk_download_documents",
     [
       "Download multiple documents in one call as a single ZIP archive.",
@@ -511,4 +631,17 @@ export function registerDocumentTools(server: McpServer, api: PaperlessAPI) {
       return convertDocsWithNames(response, api);
     })
   );
+}
+
+/** Pretty-print a byte count (B / KB / MB / GB). Used by the export tool. */
+function formatBytes(bytes: number): string {
+  if (bytes < 1024) return `${bytes} B`;
+  const units = ["KB", "MB", "GB", "TB"];
+  let value = bytes / 1024;
+  let unitIdx = 0;
+  while (value >= 1024 && unitIdx < units.length - 1) {
+    value /= 1024;
+    unitIdx++;
+  }
+  return `${value.toFixed(value >= 100 ? 0 : 1)} ${units[unitIdx]}`;
 }
