@@ -333,6 +333,39 @@ The document tools return JSON data with document IDs that you can use to constr
     // ------------------------------------------------------------------
     const streamableTransports: Record<string, StreamableHTTPServerTransport> =
       {};
+    // Last-seen timestamp per session, used by the idle reaper below.
+    // `onclose` is the only other place entries are removed from
+    // streamableTransports, and it does not fire reliably when the
+    // underlying connection dies uncleanly (proxy idle-timeout kill,
+    // client vanishing mid-session, network blip) – without this sweep
+    // those sessions leak forever and the process eventually can't
+    // service new Initialize requests. See incident 2026-08-10.
+    const streamableLastSeen: Record<string, number> = {};
+    const SESSION_IDLE_TIMEOUT_MS = 30 * 60 * 1000; // 30 minutes
+    const SESSION_REAP_INTERVAL_MS = 5 * 60 * 1000; // 5 minutes
+
+    const reapIdleStreamableSessions = () => {
+      const now = Date.now();
+      for (const [sid, lastSeen] of Object.entries(streamableLastSeen)) {
+        if (now - lastSeen <= SESSION_IDLE_TIMEOUT_MS) continue;
+        const transport = streamableTransports[sid];
+        log.warn(
+          `[reaper] closing idle session ${sid} (idle ${Math.round((now - lastSeen) / 1000)}s)`
+        );
+        delete streamableTransports[sid];
+        delete streamableLastSeen[sid];
+        try {
+          transport?.close();
+        } catch (error) {
+          log.error(`[reaper] error closing idle session ${sid}:`, error);
+        }
+      }
+    };
+    const reapTimer = setInterval(
+      reapIdleStreamableSessions,
+      SESSION_REAP_INTERVAL_MS
+    );
+    reapTimer.unref();
 
     const streamableHandler: express.RequestHandler = async (req, res) => {
       const tag = `[stream POST ${req.path}]`;
@@ -350,6 +383,7 @@ The document tools return JSON data with document IDs that you can use to constr
         if (incomingSessionId && streamableTransports[incomingSessionId]) {
           // Reuse existing transport for this session.
           transport = streamableTransports[incomingSessionId];
+          streamableLastSeen[incomingSessionId] = Date.now();
         } else if (!incomingSessionId && isInitializeRequest(req.body)) {
           // Brand-new session – create a transport, register it on
           // session-init, and clean it up on close.
@@ -358,6 +392,7 @@ The document tools return JSON data with document IDs that you can use to constr
             onsessioninitialized: (sid) => {
               log.info(`${tag} session initialized: ${sid}`);
               streamableTransports[sid] = transport;
+              streamableLastSeen[sid] = Date.now();
             },
           });
           transport.onclose = () => {
@@ -368,6 +403,7 @@ The document tools return JSON data with document IDs that you can use to constr
                 })`
               );
               delete streamableTransports[transport.sessionId];
+              delete streamableLastSeen[transport.sessionId];
             }
           };
           await server.connect(transport);
