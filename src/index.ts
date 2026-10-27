@@ -79,9 +79,15 @@ async function main() {
     `paperless: baseUrl=${resolvedBaseUrl} publicUrl=${resolvedPublicUrl} token_len=${resolvedToken!.length}`
   );
 
-  // Initialize API client and server once
+  // Initialize API client once. The McpServer itself is created PER SESSION
+  // (see createServer): the SDK's Protocol keeps exactly one `_transport` and
+  // sends every response through it, so sharing one server instance across
+  // several HTTP sessions routes responses to whichever session connected
+  // last – the other sessions' requests hang until the proxy gives up (502).
+  // See incident 2026-10-27.
   const api = new PaperlessAPI(resolvedBaseUrl!, resolvedToken!);
-  const server = new McpServer(
+  const createServer = () => {
+    const server = new McpServer(
     { name: "paperless-ngx", version },
     {
       instructions: `
@@ -102,13 +108,15 @@ Example: If your base URL is "http://localhost:8000", the web interface URL woul
 The document tools return JSON data with document IDs that you can use to construct these URLs.
       `,
     }
-  );
-  registerDocumentTools(server, api);
-  registerTagTools(server, api);
-  registerCorrespondentTools(server, api);
-  registerDocumentTypeTools(server, api);
-  registerCustomFieldTools(server, api);
-  log.info("Tool groups registered: documents, tags, correspondents, documentTypes, customFields");
+    );
+    registerDocumentTools(server, api);
+    registerTagTools(server, api);
+    registerCorrespondentTools(server, api);
+    registerDocumentTypeTools(server, api);
+    registerCustomFieldTools(server, api);
+    return server;
+  };
+  log.info("Tool groups: documents, tags, correspondents, documentTypes, customFields (registered per session)");
 
   if (useHttp) {
     const app = express();
@@ -384,31 +392,59 @@ The document tools return JSON data with document IDs that you can use to constr
           // Reuse existing transport for this session.
           transport = streamableTransports[incomingSessionId];
           streamableLastSeen[incomingSessionId] = Date.now();
-        } else if (!incomingSessionId && isInitializeRequest(req.body)) {
-          // Brand-new session – create a transport, register it on
-          // session-init, and clean it up on close.
+        } else if (isInitializeRequest(req.body)) {
+          // Brand-new session – own McpServer + transport, registered on
+          // session-init and cleaned up on close. A stale session id on an
+          // initialize call is ignored (client re-initializing after 404).
+          if (incomingSessionId) {
+            log.info(
+              `${tag} initialize with unknown session id ${incomingSessionId} – starting a new session`
+            );
+            delete req.headers["mcp-session-id"];
+          }
+          const sessionServer = createServer();
           transport = new StreamableHTTPServerTransport({
             sessionIdGenerator: () => randomUUID(),
             onsessioninitialized: (sid) => {
-              log.info(`${tag} session initialized: ${sid}`);
+              log.info(
+                `${tag} session initialized: ${sid} (active: ${Object.keys(streamableTransports).length + 1})`
+              );
               streamableTransports[sid] = transport;
               streamableLastSeen[sid] = Date.now();
             },
           });
+          await sessionServer.connect(transport);
+          // Protocol.connect() installs its own transport.onclose, so chain
+          // our cleanup AFTER connecting – setting it before (as earlier
+          // versions did) got silently overwritten and sessions leaked.
+          const protocolOnClose = transport.onclose;
           transport.onclose = () => {
-            if (transport.sessionId) {
+            protocolOnClose?.();
+            const sid = transport.sessionId;
+            if (sid && streamableTransports[sid]) {
+              delete streamableTransports[sid];
+              delete streamableLastSeen[sid];
               log.info(
-                `${tag} session closed: ${transport.sessionId} (remaining: ${
-                  Object.keys(streamableTransports).length - 1
-                })`
+                `${tag} session closed: ${sid} (remaining: ${Object.keys(streamableTransports).length})`
               );
-              delete streamableTransports[transport.sessionId];
-              delete streamableLastSeen[transport.sessionId];
             }
           };
-          await server.connect(transport);
+        } else if (incomingSessionId) {
+          // Session id we no longer know (reaped, closed or server restarted).
+          // MCP spec (Streamable HTTP, session management): respond 404 so
+          // the client starts a new session. A 400 here left Claude.ai
+          // retrying the dead session until the proxy reported 502.
+          log.warn(
+            `${tag} unknown or expired session ${incomingSessionId} – 404, client must re-initialize`
+          );
+          res.status(404).json({
+            jsonrpc: "2.0",
+            error: { code: -32001, message: "Session not found" },
+            id: null,
+          });
+          return;
         } else {
-          // Non-initialize request without a known session id.
+          // Non-initialize request without any session id.
           log.warn(
             `${tag} bad request – no session id and not an initialize call`
           );
@@ -416,8 +452,7 @@ The document tools return JSON data with document IDs that you can use to constr
             jsonrpc: "2.0",
             error: {
               code: -32000,
-              message:
-                "Bad Request: no valid session id and not an initialize call",
+              message: "Bad Request: no session id and not an initialize call",
             },
             id: null,
           });
@@ -445,14 +480,24 @@ The document tools return JSON data with document IDs that you can use to constr
       res
     ) => {
       const sid = req.headers["mcp-session-id"] as string | undefined;
-      if (!sid || !streamableTransports[sid]) {
+      if (!sid) {
         res.status(400).json({
           jsonrpc: "2.0",
-          error: { code: -32000, message: "Invalid or missing session id" },
+          error: { code: -32000, message: "Missing session id" },
           id: null,
         });
         return;
       }
+      if (!streamableTransports[sid]) {
+        // Spec: unknown/terminated session → 404 so the client re-initializes.
+        res.status(404).json({
+          jsonrpc: "2.0",
+          error: { code: -32001, message: "Session not found" },
+          id: null,
+        });
+        return;
+      }
+      streamableLastSeen[sid] = Date.now();
       await streamableTransports[sid].handleRequest(req, res);
     };
 
@@ -481,7 +526,7 @@ The document tools return JSON data with document IDs that you can use to constr
           delete sseTransports[transport.sessionId];
           transport.close();
         });
-        await server.connect(transport);
+        await createServer().connect(transport);
         log.debug(`[/sse GET] sessionId=${transport.sessionId} – server.connect completed`);
       } catch (error) {
         log.error("[/sse GET] error:", error);
@@ -534,7 +579,7 @@ The document tools return JSON data with document IDs that you can use to constr
   } else {
     log.info("starting on stdio");
     const transport = new StdioServerTransport();
-    await server.connect(transport);
+    await createServer().connect(transport);
   }
 }
 
