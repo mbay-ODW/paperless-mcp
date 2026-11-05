@@ -85,15 +85,17 @@ jobs:
             -p 3000:3000 \
             paperless-mcp:smoke
           for i in $(seq 1 30); do
-            code=$(curl -s --max-time 2 -o /dev/null -w "%{http_code}" http://127.0.0.1:3000/mcp || true)
-            if [ "$code" = "405" ]; then
-              echo "Smoke OK: GET /mcp returned 405"
+            # GET /mcp without a session id is answered with 400 "Missing session id"
+            # (since the session-routing fix of 2026-10-27; before it was 405).
+            body=$(curl -s --max-time 2 -w " %{http_code}" http://127.0.0.1:3000/mcp || true)
+            if [ "${body##* }" = "400" ] && echo "$body" | grep -q "Missing session id"; then
+              echo "Smoke OK: GET /mcp returned 400 Missing session id"
               docker rm -f paperless-mcp-smoke
               exit 0
             fi
             sleep 1
           done
-          echo "Timeout waiting for 405 from GET /mcp"
+          echo "Timeout waiting for 400 (Missing session id) from GET /mcp"
           docker logs paperless-mcp-smoke || true
           docker rm -f paperless-mcp-smoke
           exit 1

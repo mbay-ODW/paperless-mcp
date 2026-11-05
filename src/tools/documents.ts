@@ -1,4 +1,10 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp";
+import {
+  DEFAULT_MAX_CHARS,
+  MAX_MAX_CHARS,
+  findSnippets,
+  windowText,
+} from "./utils/textSlice";
 import { z } from "zod";
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
@@ -228,21 +234,65 @@ export function registerDocumentTools(server: McpServer, api: PaperlessAPI) {
 
   server.tool(
     "get_document_content",
-    "Get the text content of a specific document by ID. Use this when you need to read or analyze the actual document text.",
+    "Get the text content (OCR text) of a document by ID without flooding the context: returns a window " +
+      `of the text (offset/max_chars, default ${DEFAULT_MAX_CHARS} characters; when truncated=true call again ` +
+      "with offset=next_offset), or with query only the passages matching the search words (±300 characters, " +
+      "with offset and an approximate page). text_length and page_count tell how big the document is. For long " +
+      "documents search with query first, then read around the hit offsets.",
     {
       id: z.number(),
+      offset: z
+        .number()
+        .int()
+        .min(0)
+        .optional()
+        .describe("Character offset to start from (default 0)"),
+      max_chars: z
+        .number()
+        .int()
+        .min(100)
+        .max(MAX_MAX_CHARS)
+        .optional()
+        .describe(`Maximum characters returned (default ${DEFAULT_MAX_CHARS})`),
+      query: z
+        .string()
+        .optional()
+        .describe(
+          "Search words (case-insensitive, any word matches). Returns up to 20 passages instead of the text."
+        ),
     },
     withErrorHandling(async (args, extra) => {
       if (!api) throw new Error("Please configure API connection first");
       const doc = await api.getDocument(args.id);
+      const text = doc.content ?? "";
+      const pageCount = (doc as any).page_count ?? null;
+      const base = { id: doc.id, title: doc.title, page_count: pageCount };
+      if (args.query) {
+        const result = findSnippets(text, args.query, pageCount);
+        return {
+          content: [
+            {
+              type: "text",
+              text: JSON.stringify({
+                ...base,
+                text_length: text.length,
+                query: args.query,
+                ...result,
+                ...(result.total_hits > result.hits.length
+                  ? { note: "More hits than shown – narrow the query." }
+                  : {}),
+              }),
+            },
+          ],
+        };
+      }
       return {
         content: [
           {
             type: "text",
             text: JSON.stringify({
-              id: doc.id,
-              title: doc.title,
-              content: doc.content,
+              ...base,
+              ...windowText(text, args.offset ?? 0, args.max_chars ?? DEFAULT_MAX_CHARS),
             }),
           },
         ],
