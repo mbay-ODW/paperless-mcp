@@ -102,6 +102,24 @@ get_document({
 })
 ```
 
+#### get_document_content
+Returns a document's OCR text in pieces, so long documents don't fill the context.
+
+Parameters:
+- id: Document ID
+- offset (optional): character offset to start from (default 0)
+- max_chars (optional): characters to return (default 15000, max 200000)
+- query (optional): search words. Returns up to 20 passages (±300 characters) with offset and an
+  approximate page, instead of the text itself.
+
+The response has `text_length`, `page_count`, `truncated` and `next_offset`. When
+`truncated` is true, call again with `offset=next_offset`. Paperless stores OCR text without
+page breaks, so `approx_page` is only an estimate based on the position in the text.
+
+```typescript
+get_document_content({ id: 23, query: "Erstattungsbetrag" })
+```
+
 #### search_documents
 Full-text search across documents.
 
