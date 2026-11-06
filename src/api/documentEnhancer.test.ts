@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { CallToolResult } from "@modelcontextprotocol/sdk/types";
+import { CallToolResult } from "@modelcontextprotocol/server";
 import { convertDocsWithNames } from "./documentEnhancer";
 import { DocumentsResponse } from "./types";
 import { createDocument, createPaperlessApiMock } from "../test/mocks/paperlessApi";

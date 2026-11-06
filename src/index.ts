@@ -1,9 +1,16 @@
 #!/usr/bin/env node
-import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
-import { SSEServerTransport } from "@modelcontextprotocol/sdk/server/sse.js";
-import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
-import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
-import { isInitializeRequest } from "@modelcontextprotocol/sdk/types.js";
+import {
+  NodeStreamableHTTPServerTransport,
+  toNodeHandler,
+  toWebRequest,
+} from "@modelcontextprotocol/node";
+import {
+  createMcpHandler,
+  isInitializeRequest,
+  isLegacyRequest,
+  McpServer,
+} from "@modelcontextprotocol/server";
+import { serveStdio } from "@modelcontextprotocol/server/stdio";
 import { randomUUID } from "node:crypto";
 import express from "express";
 import { parseArgs } from "node:util";
@@ -120,7 +127,10 @@ The document tools return JSON data with document IDs that you can use to constr
 
   if (useHttp) {
     const app = express();
-    app.use(express.json());
+    // The body limit stays with Express (its 100 KiB default, as before). The
+    // SDK defaults to 4 MiB when it reads or classifies a body itself.
+    const MAX_REQUEST_BODY_BYTES = 100 * 1024;
+    app.use(express.json({ limit: MAX_REQUEST_BODY_BYTES }));
 
     // Generic request log – sees EVERY incoming request before routing.
     app.use((req, _res, next) => {
@@ -287,9 +297,6 @@ The document tools return JSON data with document IDs that you can use to constr
       sendUnauthorized(res, result.reason);
     };
 
-    // Store transports for each session
-    const sseTransports: Record<string, SSEServerTransport> = {};
-
     // ------------------------------------------------------------------
     // Public OAuth discovery endpoints (RFC 9728 + RFC 8414).
     // Mounted BEFORE auth so Claude.ai can bootstrap the OAuth flow.
@@ -339,7 +346,7 @@ The document tools return JSON data with document IDs that you can use to constr
     // initialization was complete" – Claude.ai expects to initialize
     // ONCE and then send many tool calls on the same session.
     // ------------------------------------------------------------------
-    const streamableTransports: Record<string, StreamableHTTPServerTransport> =
+    const streamableTransports: Record<string, NodeStreamableHTTPServerTransport> =
       {};
     // Last-seen timestamp per session, used by the idle reaper below.
     // `onclose` is the only other place entries are removed from
@@ -386,7 +393,7 @@ The document tools return JSON data with document IDs that you can use to constr
       log.trace(`${tag} body: ${JSON.stringify(req.body).slice(0, 500)}`);
 
       try {
-        let transport: StreamableHTTPServerTransport;
+        let transport: NodeStreamableHTTPServerTransport;
 
         if (incomingSessionId && streamableTransports[incomingSessionId]) {
           // Reuse existing transport for this session.
@@ -403,7 +410,7 @@ The document tools return JSON data with document IDs that you can use to constr
             delete req.headers["mcp-session-id"];
           }
           const sessionServer = createServer();
-          transport = new StreamableHTTPServerTransport({
+          transport = new NodeStreamableHTTPServerTransport({
             sessionIdGenerator: () => randomUUID(),
             onsessioninitialized: (sid) => {
               log.info(
@@ -501,35 +508,39 @@ The document tools return JSON data with document IDs that you can use to constr
       await streamableTransports[sid].handleRequest(req, res);
     };
 
-    app.post("/mcp", authMiddleware, streamableHandler);
-    app.post("/sse", authMiddleware, streamableHandler);
-    app.get("/mcp", authMiddleware, streamableSessionLookupHandler);
-    app.delete("/mcp", authMiddleware, streamableSessionLookupHandler);
+    // ------------------------------------------------------------------
+    // Protocol 2026-07-28: per request, no sessions. Requests carrying the
+    // per-request _meta envelope go to this handler; everything else keeps
+    // the sessionful 2025-era path above. isLegacyRequest is the handler's
+    // own classification, so the branch cannot disagree with it.
+    // ------------------------------------------------------------------
+    const logHandlerError = (e: Error) => log.error("[modern] handler error:", e);
+    const modernHandler = toNodeHandler(
+      createMcpHandler(() => createServer(), {
+        legacy: "reject",
+        maxRequestBodySize: MAX_REQUEST_BODY_BYTES,
+        onerror: logHandlerError,
+      }),
+      { maxRequestBodySize: MAX_REQUEST_BODY_BYTES, onerror: logHandlerError }
+    );
 
-    // ------------------------------------------------------------------
-    // SSE transport (legacy MCP spec; Claude Desktop, older Claude.ai).
-    // ------------------------------------------------------------------
-    app.get("/sse", authMiddleware, async (_req, res) => {
-      log.info("[/sse GET] new SSE connection");
+    const postHandler: express.RequestHandler = async (req, res, next) => {
+      // No parsed body (not application/json): nothing to classify, the
+      // 2025-era path answers it as before.
+      if (req.body === undefined) return streamableHandler(req, res, next);
       try {
-        const transport = new SSEServerTransport("/messages", res);
-        sseTransports[transport.sessionId] = transport;
-        log.info(
-          `[/sse GET] sessionId=${transport.sessionId} – transport registered (active sessions: ${Object.keys(sseTransports).length})`
-        );
-        res.on("close", () => {
-          log.info(
-            `[/sse GET] sessionId=${transport.sessionId} – connection closed (remaining sessions: ${
-              Object.keys(sseTransports).length - 1
-            })`
-          );
-          delete sseTransports[transport.sessionId];
-          transport.close();
+        const probe = await toWebRequest(req, req.body, {
+          maxRequestBodySize: MAX_REQUEST_BODY_BYTES,
         });
-        await createServer().connect(transport);
-        log.debug(`[/sse GET] sessionId=${transport.sessionId} – server.connect completed`);
+        const legacy = await isLegacyRequest(probe, req.body, {
+          maxRequestBodySize: MAX_REQUEST_BODY_BYTES,
+        });
+        if (legacy) return streamableHandler(req, res, next);
+        log.debug(`[modern POST ${req.path}] body keys=${Object.keys(req.body ?? {}).join(",")}`);
+        await modernHandler(req, res, req.body);
+        log.debug(`[modern POST ${req.path}] handled, response status=${res.statusCode}`);
       } catch (error) {
-        log.error("[/sse GET] error:", error);
+        log.error(`[POST ${req.path}] routing error:`, error);
         if (!res.headersSent) {
           res.status(500).json({
             jsonrpc: "2.0",
@@ -538,30 +549,17 @@ The document tools return JSON data with document IDs that you can use to constr
           });
         }
       }
-    });
+    };
 
-    app.post("/messages", authMiddleware, async (req, res) => {
-      const sessionId = req.query.sessionId as string;
-      log.debug(
-        `[/messages POST] sessionId=${sessionId} body keys=${Object.keys(req.body ?? {}).join(",")}`
-      );
-      log.trace(`[/messages POST] body: ${JSON.stringify(req.body).slice(0, 500)}`);
-      const transport = sseTransports[sessionId];
-      if (!transport) {
-        log.warn(
-          `[/messages POST] sessionId=${sessionId} – no transport found (known: ${Object.keys(sseTransports).join(",") || "none"})`
-        );
-        res.status(400).send("No transport found for sessionId");
-        return;
-      }
-      try {
-        await transport.handlePostMessage(req, res, req.body);
-        log.debug(`[/messages POST] sessionId=${sessionId} – handled, status=${res.statusCode}`);
-      } catch (error) {
-        log.error(`[/messages POST] sessionId=${sessionId} – error:`, error);
-        if (!res.headersSent) res.status(500).send("Internal server error");
-      }
-    });
+    app.post("/mcp", authMiddleware, postHandler);
+    app.post("/sse", authMiddleware, postHandler);
+    app.get("/mcp", authMiddleware, streamableSessionLookupHandler);
+    app.delete("/mcp", authMiddleware, streamableSessionLookupHandler);
+    // The HTTP+SSE transport is gone (no GET /sse or POST /messages traffic
+    // left). /sse stays a Streamable HTTP alias for connectors configured
+    // with that URL, including GET and DELETE for their sessions.
+    app.get("/sse", authMiddleware, streamableSessionLookupHandler);
+    app.delete("/sse", authMiddleware, streamableSessionLookupHandler);
 
     // Catch-all for unmatched routes – often the actual cause of "Not connected".
     app.use((req, res) => {
@@ -573,13 +571,12 @@ The document tools return JSON data with document IDs that you can use to constr
 
     app.listen(resolvedPort, () => {
       log.info(
-        `MCP server listening on :${resolvedPort} (routes: /mcp /sse /messages /.well-known/*)`
+        `MCP server listening on :${resolvedPort} (routes: /mcp /sse /.well-known/*)`
       );
     });
   } else {
     log.info("starting on stdio");
-    const transport = new StdioServerTransport();
-    await createServer().connect(transport);
+    serveStdio(() => createServer());
   }
 }
 

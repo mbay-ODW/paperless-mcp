@@ -1,10 +1,12 @@
-import { ToolCallback } from "@modelcontextprotocol/sdk/server/mcp";
-import { ZodRawShape } from "zod";
+import type { CallToolResult } from "@modelcontextprotocol/server";
 
-export const withErrorHandling = <Args extends ZodRawShape>(
-  cb: ToolCallback<Args>
-): ToolCallback<Args> => {
-  return (async (args, extra) => {
+// Deliberately not typed on the SDK's ToolCallback: Args and Extra are inferred
+// from the registerTool call, and the handler's result only has to be a
+// CallToolResult. See tsc memory use in the PR description.
+export const withErrorHandling = <Args, Extra>(
+  cb: (args: Args, extra: Extra) => CallToolResult | Promise<CallToolResult>
+) => {
+  return async (args: Args, extra: Extra): Promise<CallToolResult> => {
     try {
       return await cb(args, extra);
     } catch (err) {
@@ -20,5 +22,5 @@ export const withErrorHandling = <Args extends ZodRawShape>(
         })
       );
     }
-  }) as ToolCallback<Args>;
+  };
 };

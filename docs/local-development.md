@@ -57,7 +57,7 @@ Restart Claude Desktop, the connectors appear in the MCP picker.
 ```bash
 npx @modelcontextprotocol/inspector
 ```
-Set `Transport` to `SSE`, URL to e.g. `http://localhost:8001/sse`.
+Set `Transport` to `SSE`, URL to e.g. `http://localhost:8001/sse`. `paperless-mcp` no longer has the SSE transport: use `Streamable HTTP` with `http://localhost:8003/mcp`.
 
 ## How auth is disabled in local mode
 

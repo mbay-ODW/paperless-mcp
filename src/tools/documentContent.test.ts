@@ -13,7 +13,7 @@ const TEXT = OCR.slice(0, 100_000) + "\nErstattungsbetrag: 1.234,56 EUR\n" + OCR
 function setup() {
   const tools: Record<string, (args: any, extra: any) => Promise<any>> = {};
   const server = {
-    tool: (name: string, _d: string, _s: unknown, handler: any) => {
+    registerTool: (name: string, _config: unknown, handler: any) => {
       tools[name] = handler;
     },
   };
