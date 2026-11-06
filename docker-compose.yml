@@ -34,7 +34,7 @@ services:
       - "3000"
     # Single Host(...) router – all paths under paperless-mcp.${DOMAIN} go to
     # this container, including /.well-known/* (RFC 8414 + RFC 9728), /sse,
-    # /messages, /mcp. This is the same pattern Marco's upstream
+    # /mcp. This is the same pattern Marco's upstream
     # (marco2901/paperless-mcp-server) uses and the only one that lets
     # Claude.ai bootstrap the OAuth flow correctly, because Authelia does
     # not serve RFC 9728 (oauth-protected-resource) by default.

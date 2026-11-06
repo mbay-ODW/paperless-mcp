@@ -1,4 +1,4 @@
-import { CallToolResult } from "@modelcontextprotocol/sdk/types";
+import { CallToolResult } from "@modelcontextprotocol/server";
 import { PaperlessAPI } from "./PaperlessAPI";
 import { Document, DocumentsResponse } from "./types";
 import { NamedItem } from "./utils";

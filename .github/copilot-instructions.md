@@ -66,12 +66,14 @@ npm run start
 
 1. **Tool registration with Zod validation and error handling** - All tools should follow this pattern:
    ```typescript
-   server.tool(
+   server.registerTool(
      "tool_name",
-     "Tool description explaining what it does",
      {
-       param: z.string(),
-       optional_param: z.number().optional()
+       description: "Tool description explaining what it does",
+       inputSchema: z.object({
+         param: z.string(),
+         optional_param: z.number().optional()
+       }),
      },
      withErrorHandling(async (args, extra) => {
        // Implementation
@@ -124,10 +126,9 @@ registerCustomFieldTools(server, api);
 ```
 
 ### Transport Modes
-The server supports three transport modes:
+The server supports two transport modes:
 1. **STDIO** (default) - Standard input/output, for CLI integrations
-2. **HTTP** - Streamable HTTP transport via Express (POST to `/mcp` endpoint)
-3. **SSE** - Server-Sent Events via Express (GET to `/sse` endpoint, POST messages to `/messages?sessionId=<id>`)
+2. **HTTP** - Streamable HTTP transport via Express on `/mcp` and `/sse`: 2026-07-28 per request, 2025 revisions with sessions
 
 ### Critical Behaviors to Document
 When creating or modifying tools, clearly distinguish:

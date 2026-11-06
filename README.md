@@ -497,14 +497,14 @@ To run the server as an HTTP service, use the `--http` flag. You can also specif
 npm run start -- <baseUrl> <token> --http --port 3000
 ```
 
-- The MCP API will be available at `POST /mcp` on the specified port.
-- Each request is handled statelessly, following the [StreamableHTTPServerTransport](https://github.com/modelcontextprotocol/typescript-sdk) pattern.
-- GET and DELETE requests to `/mcp` will return 405 Method Not Allowed.
+- The MCP API is available at `/mcp` on the specified port, and at `/sse` as an alias for connectors configured with that URL.
+- Protocol revision 2026-07-28 is answered per request. The 2025 revisions keep sessions: `initialize` creates one, `GET` and `DELETE` work on an existing one, and `GET` without a session id returns 400.
+- The old HTTP+SSE transport (`GET /sse` + `POST /messages`) is gone.
 
 <details>
 <summary>Docker Deployment</summary>
 
-The MCP server can be deployed using Docker and Docker Compose. The Docker image automatically runs in HTTP mode with SSE (Server-Sent Events) support on port 3000.
+The MCP server can be deployed using Docker and Docker Compose. The Docker image automatically runs in HTTP mode (Streamable HTTP) on port 3000.
 
 ### Docker Compose Configuration
 
@@ -531,7 +531,7 @@ docker-compose up -d
 
 ### Using with Continue VS Code Extension
 
-If you're using the [Continue VS Code extension](https://continue.dev/), you can configure it to use the Dockerized MCP server via SSE.
+If you're using the [Continue VS Code extension](https://continue.dev/), you can configure it to use the Dockerized MCP server via Streamable HTTP.
 
 Create or edit `.continue/mcpServers/paperless-mcp.yaml` at your workspace root:
 
@@ -541,14 +541,14 @@ version: 0.0.1
 schema: v1
 mcpServers:
   - name: Paperless
-    type: sse
-    url: http://localhost:3000/sse
+    type: streamable-http
+    url: http://localhost:3000/mcp
 ```
 
 **Notes:**
 - Replace `localhost` with your Docker host's IP address or hostname if running on a remote server
 - The Docker container handles authentication via environment variables, so no credentials are needed in the Continue config
-- The SSE endpoint is available at `/sse` on the configured port (default: 3000)
+- The MCP endpoint is available at `/mcp` on the configured port (default: 3000)
 
 </details>
 

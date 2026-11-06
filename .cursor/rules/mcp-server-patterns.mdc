@@ -14,11 +14,13 @@ Follow the pattern in [src/tools/customFields.ts](mdc:src/tools/customFields.ts)
 
 ```typescript
 export function registerEntityTools(server: McpServer, api: PaperlessAPI) {
-  server.tool(
+  server.registerTool(
     "list_entities",
-    "Description with IMPORTANT notes about caching and efficiency",
     {
-      // Zod schema for parameters
+      description: "Description with IMPORTANT notes about caching and efficiency",
+      inputSchema: z.object({
+        // Zod schema for parameters
+      }),
     },
     withErrorHandling(async (args, extra) => {
       // Implementation

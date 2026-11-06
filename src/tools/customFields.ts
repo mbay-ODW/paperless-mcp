@@ -1,28 +1,29 @@
-import { McpServer } from "@modelcontextprotocol/sdk/server/mcp";
+import { McpServer } from "@modelcontextprotocol/server";
 import { z } from "zod";
 import { PaperlessAPI } from "../api/PaperlessAPI";
 import { withErrorHandling } from "./utils/middlewares";
 import { buildQueryString } from "./utils/queryString";
 
 export function registerCustomFieldTools(server: McpServer, api: PaperlessAPI) {
-  server.tool(
+  server.registerTool(
     "list_custom_fields",
-    "List all custom fields. IMPORTANT: When a user query may refer to a custom field, you should fetch all custom fields up front (with a large enough page_size), cache them for the session, and search locally for matches by name before making further API calls. This reduces redundant requests and handles ambiguity efficiently.",
     {
-      page: z.number().optional(),
-      page_size: z.number().optional(),
-      name__icontains: z.string().optional(),
-      name__iendswith: z.string().optional(),
-      name__iexact: z.string().optional(),
-      name__istartswith: z.string().optional(),
-      ordering: z.string().optional(),
+      description:
+        "List all custom fields. IMPORTANT: When a user query may refer to a custom field, you should fetch all custom fields up front (with a large enough page_size), cache them for the session, and search locally for matches by name before making further API calls. This reduces redundant requests and handles ambiguity efficiently.",
+      inputSchema: z.object({
+        page: z.number().optional(),
+        page_size: z.number().optional(),
+        name__icontains: z.string().optional(),
+        name__iendswith: z.string().optional(),
+        name__iexact: z.string().optional(),
+        name__istartswith: z.string().optional(),
+        ordering: z.string().optional(),
+      }),
     },
     withErrorHandling(async (args = {}) => {
       if (!api) throw new Error("Please configure API connection first");
       const queryString = buildQueryString(args);
-      const response = await api.request(
-        `/custom_fields/${queryString ? `?${queryString}` : ""}`
-      );
+      const response = await api.request(`/custom_fields/${queryString ? `?${queryString}` : ""}`);
       return {
         content: [
           {
@@ -34,10 +35,13 @@ export function registerCustomFieldTools(server: McpServer, api: PaperlessAPI) {
     })
   );
 
-  server.tool(
+  server.registerTool(
     "get_custom_field",
-    "Get a specific custom field by ID with full details including data type and extra configuration.",
-    { id: z.number() },
+    {
+      description:
+        "Get a specific custom field by ID with full details including data type and extra configuration.",
+      inputSchema: z.object({ id: z.number() }),
+    },
     withErrorHandling(async (args, extra) => {
       if (!api) throw new Error("Please configure API connection first");
       const response = await api.getCustomField(args.id);
@@ -47,23 +51,26 @@ export function registerCustomFieldTools(server: McpServer, api: PaperlessAPI) {
     })
   );
 
-  server.tool(
+  server.registerTool(
     "create_custom_field",
-    "Create a new custom field with a specified data type (string, url, date, boolean, integer, float, monetary, documentlink, or select). For monetary fields, values must use currency code prefix format (e.g., USD10.00, GBP123.45) — NOT trailing symbol format (e.g., 10.00$).",
     {
-      name: z.string(),
-      data_type: z.enum([
-        "string",
-        "url",
-        "date",
-        "boolean",
-        "integer",
-        "float",
-        "monetary",
-        "documentlink",
-        "select",
-      ]),
-      extra_data: z.record(z.unknown()).nullable().optional(),
+      description:
+        "Create a new custom field with a specified data type (string, url, date, boolean, integer, float, monetary, documentlink, or select). For monetary fields, values must use currency code prefix format (e.g., USD10.00, GBP123.45) — NOT trailing symbol format (e.g., 10.00$).",
+      inputSchema: z.object({
+        name: z.string(),
+        data_type: z.enum([
+          "string",
+          "url",
+          "date",
+          "boolean",
+          "integer",
+          "float",
+          "monetary",
+          "documentlink",
+          "select",
+        ]),
+        extra_data: z.looseObject({}).nullable().optional(),
+      }),
     },
     withErrorHandling(async (args, extra) => {
       if (!api) throw new Error("Please configure API connection first");
@@ -74,26 +81,29 @@ export function registerCustomFieldTools(server: McpServer, api: PaperlessAPI) {
     })
   );
 
-  server.tool(
+  server.registerTool(
     "update_custom_field",
-    "Update an existing custom field's name, data type, or extra configuration data.",
     {
-      id: z.number(),
-      name: z.string().optional(),
-      data_type: z
-        .enum([
-          "string",
-          "url",
-          "date",
-          "boolean",
-          "integer",
-          "float",
-          "monetary",
-          "documentlink",
-          "select",
-        ])
-        .optional(),
-      extra_data: z.record(z.unknown()).nullable().optional(),
+      description:
+        "Update an existing custom field's name, data type, or extra configuration data.",
+      inputSchema: z.object({
+        id: z.number(),
+        name: z.string().optional(),
+        data_type: z
+          .enum([
+            "string",
+            "url",
+            "date",
+            "boolean",
+            "integer",
+            "float",
+            "monetary",
+            "documentlink",
+            "select",
+          ])
+          .optional(),
+        extra_data: z.looseObject({}).nullable().optional(),
+      }),
     },
     withErrorHandling(async (args, extra) => {
       if (!api) throw new Error("Please configure API connection first");
@@ -105,39 +115,50 @@ export function registerCustomFieldTools(server: McpServer, api: PaperlessAPI) {
     })
   );
 
-  server.tool(
+  server.registerTool(
     "delete_custom_field",
-    "⚠️ DESTRUCTIVE: Permanently delete a custom field from the entire system. This will remove the field from ALL documents that use it.",
-    { 
-      id: z.number(),
-      confirm: z.boolean().describe("Must be true to confirm this destructive operation"),
+    {
+      description:
+        "⚠️ DESTRUCTIVE: Permanently delete a custom field from the entire system. This will remove the field from ALL documents that use it.",
+      inputSchema: z.object({
+        id: z.number(),
+        confirm: z.boolean().describe("Must be true to confirm this destructive operation"),
+      }),
     },
     withErrorHandling(async (args, extra) => {
       if (!api) throw new Error("Please configure API connection first");
       if (!args.confirm) {
-        throw new Error("Confirmation required for destructive operation. Set confirm: true to proceed.");
+        throw new Error(
+          "Confirmation required for destructive operation. Set confirm: true to proceed."
+        );
       }
       await api.deleteCustomField(args.id);
       return {
-        content: [
-          { type: "text", text: JSON.stringify({ status: "deleted" }) },
-        ],
+        content: [{ type: "text", text: JSON.stringify({ status: "deleted" }) }],
       };
     })
   );
 
-  server.tool(
+  server.registerTool(
     "bulk_edit_custom_fields",
-    "Bulk edit custom fields. ⚠️ WARNING: 'delete' operation permanently removes custom fields from the entire system.",
     {
-      custom_fields: z.array(z.number()),
-      operation: z.enum(["delete"]),
-      confirm: z.boolean().optional().describe("Must be true when operation is 'delete' to confirm destructive operation"),
+      description:
+        "Bulk edit custom fields. ⚠️ WARNING: 'delete' operation permanently removes custom fields from the entire system.",
+      inputSchema: z.object({
+        custom_fields: z.array(z.number()),
+        operation: z.enum(["delete"]),
+        confirm: z
+          .boolean()
+          .optional()
+          .describe("Must be true when operation is 'delete' to confirm destructive operation"),
+      }),
     },
     withErrorHandling(async (args, extra) => {
       if (!api) throw new Error("Please configure API connection first");
       if (args.operation === "delete" && !args.confirm) {
-        throw new Error("Confirmation required for destructive operation. Set confirm: true to proceed.");
+        throw new Error(
+          "Confirmation required for destructive operation. Set confirm: true to proceed."
+        );
       }
       const response = await api.bulkEditObjects(
         args.custom_fields,
@@ -154,4 +175,4 @@ export function registerCustomFieldTools(server: McpServer, api: PaperlessAPI) {
       };
     })
   );
-} 
+}
